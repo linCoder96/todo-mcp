@@ -1,0 +1,214 @@
+/* 唯一样式表，无 CSS 框架（design.md §2.3/§5：低内存优先，不引组件库、无动效） */
+
+:root {
+  color-scheme: light;
+  --border: #d9dce3;
+  --text: #1f2328;
+  --text-secondary: #6a737d;
+  --accent: #2563eb;
+  --danger: #c62828;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  font-size: 14px;
+  color: var(--text);
+  background: #f6f7f9;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+.app-header {
+  padding: 12px 20px;
+  background: #ffffff;
+  border-bottom: 1px solid var(--border);
+}
+
+.app-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.app-error {
+  margin: 8px 20px 0;
+  padding: 6px 10px;
+  color: var(--danger);
+  border: 1px solid #efc7c7;
+  background: #fff5f5;
+}
+
+.app-hint {
+  margin: 32px auto;
+  color: var(--text-secondary);
+}
+
+/* 快捷新建 */
+.quick-add-row {
+  padding: 12px 20px 8px;
+  background: #ffffff;
+}
+
+.quick-add {
+  width: 100%;
+  padding: 8px 10px;
+  font: inherit;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+/* 筛选 tab */
+.filter-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 0 20px 10px;
+  background: #ffffff;
+  border-bottom: 1px solid var(--border);
+}
+
+.filter-tab {
+  padding: 5px 12px;
+  font: inherit;
+  color: var(--text-secondary);
+  background: #ffffff;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.filter-tab.active {
+  color: var(--accent);
+  border-color: var(--accent);
+  font-weight: 600;
+}
+
+/* 任务列表 */
+.task-list {
+  margin: 12px 20px;
+  padding: 0;
+  list-style: none;
+}
+
+.task-item {
+  margin-bottom: 8px;
+  padding: 10px 12px;
+  background: #ffffff;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+.task-item.done .task-title {
+  color: var(--text-secondary);
+  text-decoration: line-through;
+}
+
+.task-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  cursor: pointer;
+}
+
+.task-check {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  cursor: pointer;
+}
+
+.task-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-priority {
+  flex: 0 0 48px;
+  color: var(--text-secondary);
+  text-align: center;
+}
+
+.task-priority.priority-3 {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.task-due {
+  flex: 0 0 auto;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.task-due.overdue {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.task-delete {
+  flex: 0 0 auto;
+  padding: 4px 8px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: #ffffff;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.task-delete.confirming {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+/* 行内编辑：无弹窗、无动效 */
+.task-editor {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.editor-title {
+  flex: 1 1 240px;
+  padding: 6px 8px;
+  font: inherit;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+.editor-priority,
+.editor-due {
+  padding: 6px 8px;
+  font: inherit;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+.editor-save,
+.editor-cancel {
+  padding: 6px 10px;
+  font: inherit;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.editor-save {
+  color: #ffffff;
+  background: var(--accent);
+  border-color: var(--accent);
+}

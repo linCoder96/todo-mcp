@@ -1,0 +1,27 @@
+[package]
+name = "todo-mcp"
+version = "0.1.0"
+description = "桌面端待办任务管理工具：GUI（Tauri 2 托盘常驻）+ MCP（rmcp stdio）单 exe 双模式"
+edition = "2024"
+
+# 见 design.md §9：rmcp 升级快，锁定精确版本，升级前先读 migration guide
+[dependencies]
+rmcp = { version = "=3.11.0", features = ["server", "transport-io"] }
+schemars = "1"
+rusqlite = { version = "0.43", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-single-instance = "2"
+tokio = { version = "1", features = ["rt", "time", "io-std"] }
+uuid = { version = "1", features = ["v7"] }
+dirs = "7"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+# Tauri 2 官方模板布局：代码入库（gui/mcp/db 分模块），main.rs 仅做参数分发；
+# 库目标使 tests/ 集成测试可以经由公开 API 覆盖 db 层
+[lib]
+name = "todo_mcp_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]

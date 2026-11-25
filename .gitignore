@@ -1,0 +1,23 @@
+# Go / Viva 构建产物
+build/
+*.exe
+*.pdb
+*.test
+*.out
+
+# 归档的旧 Tauri 工程（只忽略生成物，源码保留供迁移核对）
+legacy/tauri/node_modules/
+legacy/tauri/dist/
+legacy/tauri/src-tauri/target/
+legacy/tauri/src-tauri/gen/
+
+# 临时脚手架与日志
+.viva-scaffold/
+*.log
+.viva_*.png
+.ps_*.ps1
+
+# 协调循环运行时状态与调试临时产物
+.todo-loop/
+.m4_before.png
+hs2.err

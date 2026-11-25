@@ -1,0 +1,813 @@
+# todo-mcp
+
+A desktop application built with Viva (Go, drawn on the GPU, no web view). This file is
+the short form of how to write it; read it before changing the UI. The commands:
+
+```sh
+viva dev .          # run with hot reload: save a file, the window reloads and keeps its state
+go test ./...      # tests drive the real application with no window (see Testing)
+viva vet            # the page mistakes that compile but do the wrong thing (see Mistakes)
+viva build          # a release program in build/
+viva help           # every command
+```
+
+## Start here
+
+Read this file out of order: find your task in the table below, then read that section.
+When a name is uncertain, ask the source instead of guessing:
+
+```sh
+go doc github.com/vivaui/viva/ui          # every exported element and call
+go doc github.com/vivaui/viva/ui.Button   # one of them, with its comment
+```
+
+A symbol that `go doc` does not show does not exist. The compiler is the second check;
+`viva vet` is the third.
+
+The loop for every change:
+
+1. Write the page in main.go. Keep state in the model; handle a click where its control is declared.
+2. `gofmt -w ./*.go && go vet ./... && viva vet` — fix every finding before running the app.
+3. `go test ./... -count=1` — main_test.go drives the real page with no window; extend it.
+4. Check the picture headlessly: build with `-tags vivahead`, run with `VIVA_HEADLESS=1`
+   and a throwaway `HOME`, then `layout` and `expect` (see "Check it without a window").
+5. Say what you did not verify. A unit test does not prove IME, focus loss, a window-manager
+   close or a real GPU.
+
+## What are you building?
+
+| You are building | Read | Main calls |
+| --- | --- | --- |
+| Settings, preferences, login, a wizard, steppers, a search box | Forms and fields | `ui.FormField`, `ui.TextField`, `ui.Switch`, `ui.Choice`, `ui.Button`, `viva form` |
+| A list: todo, cart, inbox, notifications, a log, kanban, master-detail | Lists, trees and scrolling | `ui.List`, `ui.ListState`, `ui.Scroll`, `c.KeyInt`, `ui.Row` |
+| A table with sortable columns | Tables | `ui.Table`, `ui.TableSpec`, `ui.TableRows`, `components.TableColumn` |
+| Tabs or a navigation strip | Tabs and select | `ui.Tabs`, `ui.Choice`, a `switch` on the value |
+| A tree, a file tree, a gallery, a calendar grid | Lists, trees and scrolling | `ui.Tree`, `ui.TreeState`, `ui.Grid`, `ui.Flow` |
+| A dialog, menu, popup, drawer or dashboard | Menus, dialogs and popups | `ui.Modal`, `ui.ModalWith`, `ui.Dialog`, `ui.Menu`, `ui.PopoverWith`, `ui.Drawer` |
+| Animation, a progress bar, a timer, a media player | Animation and time | `c.Canvas().Now()`, `c.Canvas().RequestFrame()`, `ui.Progress`, `ui.Spinner` |
+| Light/dark, a color picker, custom colors | The theme | `gfx.LightTheme()`, `gfx.DarkTheme()`, `PageConfig.Theme`, `c.Theme()` |
+| A split pane, a divider, drag and drop | Keys, drag and the mouse | `ui.Splitter`, `ui.DragState`, `.DragSource`, `.DropTarget` |
+| A chat or a log that follows its end | Lists, trees and scrolling | `ui.Scroll(...).Follow(true)`, `MaxWidthPercent`, `Justify` |
+| A second window, a tray window | Several windows | `app.RunApplication`, `ui.OpenWindow`, `ui.Application(c)` |
+
+## How a window works
+
+The window's page is a function, `page(c ui.C)` in main.go, which `ui.Run` paints.
+It is called again after every event that could change the picture. It draws the whole
+window from your state, and it may be called many times, so it must be cheap and must not
+change state, with one exception: a click is handled where its control is declared (below).
+Nothing draws unless an event, `Invalidate`, or a running animation asks for a frame; there
+is no frame loop to write.
+
+State lives in a struct (`model` in main.go). The page reads it. Never keep a `ui.Box`,
+a `ui.C`, a `gfx.Canvas` or a closure given to `Children` after the page returns; `Box.Valid()`
+says whether one still names an element of the current paint.
+
+## Pages: ui.C
+
+Every element is a function of `ui` that takes the page's `c` first: layout, text, controls,
+overlays, lists, and your own components. What follows the call is the same chain as below
+(`.Pad`, `.Gap`, `.Grow`, `.Children(func() { ... })`). A page imports `ui` alone: colors, geometry and the
+theme are there too (`ui.RGB`, `ui.Color`, `ui.Rect`, `ui.Theme`, `ui.LightTheme()`). Package `gfx` is for
+what is below a page: painting, input events, keys and identities. Controls take the value they change:
+
+```go
+func (m *model) page(c ui.C) {
+	ui.Column(c).Fill().Pad(24).Gap(12).Children(func() {
+		ui.TextField(c, &m.name, "Name", "Your name") // m.name is a string; typing needs nothing more
+		ui.Switch(c, &m.notify, "Notify me")          // a click flips m.notify
+		ui.Choice(c, &m.theme, themes, nil)           // m.theme is one of themes ([]string here; else pass a label func)
+		ui.Select(c, &m.size, sizes, nil)             // a drop-down; its open state is its own
+		ui.Scroll(c).Grow(1).Children(func() {
+			for i := range m.hosts {
+				h := &m.hosts[i]
+				ui.Row(c.KeyInt(h.ID)).Gap(8).Children(func() { // Key a row by its item: it keeps focus as rows move
+					ui.Checkbox(c, &h.Done, h.Name)
+					if ui.Button(c, "Delete").Ghost().Clicked() {
+						c.After(func() { m.remove(h.ID) }) // changes the list: after the paint
+					}
+				})
+			}
+		})
+		if ui.Button(c, "Save").Clicked() { m.save() }
+	})
+	ui.Modal(c, &m.confirm, "Delete host?", func() { /* body */ }, func() { /* footer buttons */ })
+	ui.Popover(c, anchorBox, &m.menuOpen, func() { /* the panel */ })
+}
+```
+
+### Names, keys and state
+
+- `c.Key("text")` / `c.KeyInt(id)` name the next element (a row); `c.Part("word")` names a part of a
+  component. Everything else is named by its place in its parent: no names to declare.
+- Bind fields of the model (`&h.Done`). A copy (`v := m.viewed[id]; ui.Checkbox(c, &v, ...)`) works too:
+  write it back on `.Changed()`.
+- `Changed()` reports the paint in which a bound control changed its value; `Clicked()` on a `Button`.
+  `Popover` and `Modal` set their `*bool` to false when dismissed (Escape, a press outside, the close
+  button) and give the focus back.
+- `ui.ID(c)` names the next element of the page (a `Hit` box, a `Control`, a recipe); `c.Theme()` is the
+  theme; `c.Bounds()` and `c.Canvas()` are for measuring.
+- In a test, find controls by their name (`Hit.Label`), as main_test.go does.
+
+### Lists, trees and scrolling
+
+- Long lists: `ui.List(c, &m.list, len(items), func(row ui.ListRow) { row.Element.PadX(8).Children(...) })` declares only the rows
+  on screen; style the row with `row.Element`, declare what is in it with `row.C`, name the list with `.Label("Files")`. A click
+  chooses a row (`m.list.Selected()`, `Changed()`), the arrows, Home, End and Page Up/Down move, Enter or a double click is
+  `m.list.Submitted()`, and `m.list.Label = func(i int) string` makes typing a row's first letters move to it (`m.list.Name = func(i int) string`
+  is the name assistive technology reads when a row speaks more than its text, and `m.list.NoTypeahead` leaves typed keys to the page).
+  `m.list.HasFocus()` says the keyboard is on its rows. Set `m.list.Selection =
+  &m.chosen` (a `ui.Selection`, held by `m.list.Key`) to let the user choose several: Primary-click toggles, Shift extends, Primary+A
+  chooses all. `m.list.ScrollTo(row, ui.ListCenter)`, `ScrollIntoView`, `ScrollToEnd`, `Visible()` and `AtEnd()` move and read it; a
+  row it has not measured is placed from the rows it has, so a scroll request settles over the few paints it asks for itself.
+  `box.ClickModifiers()` and `box.DoubleClicked()` read how a click on any element came. Do not number rows or keep a selected
+  index of your own. `row.Element` is a Row, so an icon, a name and a size lie side by side. `m.list.Header = func(i int) bool`
+  makes some rows section headings: the heading of the section at the top stays there until the next pushes it away (give it a
+  Background; it is not chosen, focused or typed to, and the keys pass over it). `m.list.Reorder = func(rows []int, to int)` lets
+  the user drag rows (the chosen ones when the row dragged is chosen) and calls it with the rows and the row they go before; move
+  them there, in the model. `m.list.Handle = grips` (a `gfx.Scope`) makes a drag start only on the hit each row names in that
+  scope, as a grip, so the row body keeps its clicks; the arrows, Home and End on a focused grip then reorder without Alt. `m.list.RowWidth = 900` makes the rows at least that wide and the list scrolls sideways (the
+  horizontal wheel, or the wheel with Shift); a column header above it follows with
+  `ui.Row(c).Clip().Children(func() { ui.Row(c).Width(900).ScrollWith(&m.list).Children(titles) })`.
+- A tree: keep a `ui.TreeState` with `Node` describing each visible row, `ui.Tree(c, &m.tree, n, label, nil)`,
+  then `m.tree.Toggled()` (open or close that branch, give the tree its new rows) and `m.tree.Chosen()`.
+  Typing the start of a name moves to that row. To drag rows, set `m.tree.CanDrop = func(from, to int,
+  where ui.TreeDrop) bool` (`TreeDropBefore`, `TreeDropInside`, `TreeDropAfter`) and read `m.tree.Dropped()`;
+  change the rows in `c.After`, since the paint that reports the drop is declaring them.
+  `m.tree.RowID(i)` (`DisclosureID(i)` for the chevron; `ListState` has `RowID`) is a row's identity, to focus it or find its hit.
+- To read or move a page's scroll area: `area := ui.Scroll(c).Grow(1)` then `area.ScrollState()` has `Offset`,
+  `Content`, `Viewport`, `Max()`, `AtEnd()`, `Pinned()`, `Dragging()`, `ScrollTo(px)`, `ScrollToEnd()` and
+  `Key(event, step)` for a pane the page gives the keyboard (also for the area a `ui.List` or `ui.Tree` returns);
+  ask for it in each paint and do not keep the pointer. `BarGeometry(bounds, barSize)` is the tracks and thumb for a
+  scrollbar the page paints itself; `.ScrollbarValues(vertical, horizontal)` is the value assistive technology reads for them. The page gives the
+  wheel to the area under the pointer (the innermost, or the next one out when that is at its end), so side-by-side
+  columns and nested lists each scroll alone. `.Follow(true)` keeps a log or chat at its end until the user scrolls
+  up (and again when they scroll back down; `.Follow(m.autoScroll)` makes it a switch); `Following()` says whether it is
+  attached to the end now, `Prepend(delta)` keeps the reader's rows in place when content above changes, and `Pinned()` says the next
+  layout puts it at its end before `Offset` has caught up. `.Sideways()` scrolls left and right too (`OffsetX`,
+  `ContentWidth`, `ViewportWidth`, `MaxX()` and `ScrollToX(px)`), and `.Scrollbars()` draws draggable bars over the
+  overflowing edges. The bars are the hover style: they appear while the pointer is over the area or the view
+  moves, stay a moment after the pointer leaves, and fade out; `.AlwaysScrollbars()` keeps them drawn at rest
+  instead of revealing them on hover. `.ScrollbarSize(px)` sets their thickness (a right `Pad` leaves the gutter
+  they sit in instead of covering the content). `PageConfig.ScrollbarSize` sets the page's default thickness for
+  every bar that does not set its own. `.ScrollbarIDs(vertical, horizontal)` names the two bars with your own
+  identities (by default they are named under the area's), and `.ScrollbarLabels(vertical, horizontal)` names
+  them to assistive technology.
+  An area a paint does not declare forgets its offset (a closed dialog, another tab).
+
+### Menus, dialogs and popups
+
+- `.Tooltip("Delete")` on a control is the tip shown while the pointer rests on it (and its description).
+- A menu of actions off a button: `ui.Menu(c, more, &m.menu, func(menu *ui.MenuItems) { if menu.Item("Rename").Clicked() { ... } })`;
+  `menu.Item("Rename").ID()` is the row's identity, for anchoring a part or context menu; `menu.Separator()`,
+  `menu.Label("Group")`, `.Destructive()`, `.Disabled(x)`. Choosing an item closes it.
+  Typing a letter goes to the item it begins. `menu.Sub("Move to", func(to *ui.MenuItems) { ... })` is a submenu
+  (opens as the pointer rests on it, on a click, or on Right/Enter/Space; Left goes back), in a ContextMenu too.
+- A right-click menu: `ui.ContextMenu(c, row, func(menu *ui.MenuItems) { ... })` (Shift+F10 opens it too); items
+  take `.Icon(icon)`, `.Keys(ui.Primary, "c")` (shown, not bound), `.Checked(on)` and `.Chosen(on)`.
+- A row a menu cannot say: `menu.ContentPage(40, func(c ui.C, bounds ui.Rect) { ui.ColorSwatch(c, ...) })` declares page controls
+  in a row of their own (the keyboard passes over it); `menu.Content(height, paint)` is the canvas painter for a row
+  the page cannot declare.
+- `ui.SelectID(c, id, &m.size, choices, nil)` is `ui.Select` for a control the application names: a row's words can be its `LabelFor`, and the application's key and focus routing can target it.
+- Color choices: `ui.ColorSwatch(c, color, chosen, "Red")` is a radio (`.Flush()` fills its border with the color, `.TabStop(chosen)` makes one swatch the Tab stop, `ColorSwatchID` keeps an application identity); `ui.ColorPicker(c, &m.picker, &m.color, "Accent")` opens a panel to pick one, `.Draft()` follows the drag before Apply and `.Applied()` says a choice was committed.
+- A side panel: `ui.Drawer(c, &m.open, "Title", ui.DrawerSpec{Side: ui.DrawerLeft, Size: 320}, body, footer)`;
+  an empty title gives the body the whole panel, `NonModal` keeps the keyboard on the page, `Swipe` adds a
+  handle that a drag toward the edge closes it by (past half its size, or thrown).
+- A modal dialog: declare it while it is open, `ui.Modal(c, &m.confirm, "Delete host?", body, footer)`; the title is
+  required because it names the dialog for screen readers, and `body`/`footer` may be nil. It is centered over a scrim,
+  keeps the keyboard while open and gives it back as it closes; a press on the scrim, the close button and Escape set
+  `m.confirm` to false. `ui.ModalWith(c, &m.confirm, "Delete host?", ui.ModalSpec{Description: "...", Width: 400}, body, footer)`
+  adds a description, a size, `NoClose` or `InitialFocus`. For a dialog whose identities the application names itself, use
+  `ui.Dialog(c, ui.DialogSpec{...})`: `Scope`, `DismissID`, `CloseID` and `InitialFocusID` are yours, `.Header(fn)`,
+  `.Body(fn)` and `.Footer(fn)` declare it, and `.Dismissed()` reports the closing click. Do not write an Escape handler
+  for any of these; they dismiss themselves.
+- A popup of your own: `ui.Popover(c, anchor, &m.open, body)` or
+  `ui.PopoverWith(c, anchor, ui.PopoverSpec{Width: 220, Align: ui.Start}, &m.open, body)`; it opens off its anchor,
+  flips when there is no room, closes on Escape or an outside press, and gives the focus back. A floating region that
+  is none of these is `ui.Overlay(c, ui.OverlaySpec{Band: ui.LayerPaneChrome, Bounds: r})` (or `ui.LayerDrag` for a
+  drag ghost): it takes no room, paints after the page and below Viva's menus and dialogs, and its children are page
+  elements. Its empty surface lets presses through unless a `Canvas.Block` covers it. Do not build a popup from a
+  `Slot` and a `Hit`; the page's overlays keep the pointer, focus and dismissal a popup needs. A component author who
+  declares the underlying popup places it with `Beside(rect, gap, align)` or `BesideBox(box, gap, align)` to the right
+  of an anchor (a submenu), `BesideLeft`/`BesideLeftBox` to its left, and `Within(rect)` to keep it inside a region
+  instead of the window; `ui.PopoverWith`'s `Side` is the application-level form of the same placement.
+  `Below`/`BelowBox` and `Above`/`AboveBox` place below and above.
+
+### Choices, toasts and shortcuts
+
+- `ui.Choice` (a segmented single choice) and `ui.Tabs` are one tab stop each; the arrow keys, Home and End move to an
+  option and choose it, so do not wire `components.SegmentedControlKeyDown` or `TabsKeyDown` yourself.
+  `Choice`, `Tabs` and `Select` write the value in the declaration, so disable them with an `if`, not a chained
+  `.Disabled`: `if !m.locked { if ui.Tabs(c, &m.tab, tabs, nil).Changed() { ... } }`. `Tabs` and `Select` also honor a
+  chained `.Disabled` for input; `Choice` ignores it, so never rely on it there.
+- Hierarchical path values ("School/Class A") use the opt-in package `github.com/vivaui/viva/ui/hierarchypicker`: `state := hierarchypicker.NewState(paths)`, keep `picker := hierarchypicker.New(state)` in the model, and declare `picker.View(c, hierarchypicker.Spec{Label: "Group", OptionIDs: groupOptions}).FillWidth()`; `SetValue`/`Value` read and set the full path.
+- Removable chips with a filtered query are the opt-in package `github.com/vivaui/viva/ui/multiselect`: keep `picker := multiselect.New(&m.tags)` in the model and declare `picker.View(c, multiselect.Spec{Label: "Tags", Options: tagOptions, Removes: tagRemoves}).FillWidth()`; `tagOptions.At(i)` and `tagRemoves.At(i)` name the popup rows and chip remove buttons. Import it only when used.
+- A long list to choose from by typing: `ui.Combobox(c, &m.zone, zones, Zone.String, "Time zone")` (Select's
+  arguments plus a label); it filters as the user types. `.Clearable()` adds a clear button, `.Empty("No zone")`
+  is what an empty list says, `.Creatable("")` offers what was typed as a new choice, read with `.Created()`.
+- A button with an icon: `ui.Button(c, "New host").Icon(plus)`; `.Icon(trash).IconOnly()` for the icon alone.
+- Toasts: keep a `ui.Toaster` in the model, `m.toaster.Show("Saved", "", ui.ToastSuccess)`, and declare
+  `ui.Toasts(c, &m.toaster)` once, last in the page. `ShowAction(title, "", kind, "Undo")` adds a button,
+  `m.toaster.Acted()` (after `Toasts`) reports its press; a `ui.ToastLoading` toast stays until
+  `m.toaster.Done(id, title, "", ui.ToastSuccess)` replaces it; `Toaster.Position` picks the corner.
+- Keyboard shortcuts are declared where they act: `if ui.Shortcut(c, ui.Primary, "s") { m.save() }` (Primary is
+  Command on macOS, Control elsewhere); `list.Shortcut(0, "delete")` on a container or control acts only while the
+  focus is in it, the innermost one winning. A chord without Primary, Ctrl or Alt is left to a field being typed in.
+
+### Optional page packages
+
+- A heavy or stateful page control is an opt-in package under `github.com/vivaui/viva/ui/<capability>`; import it only
+  when the page uses it. The package name is the capability, never a `view` suffix: `ui/calendar`, `ui/message`,
+  `ui/chart`, `ui/sidebar`. Its state type is named by role, not by repeating the package: `calendar.State`,
+  `message.Row`, `attachment.Card`. Use `cal`, `msg`, `pic` for locals; a model field may keep the noun
+  (`m.calendar`) because a selector never shadows a package.
+- Editors and visuals: `ui/codeeditor`, `ui/chart`, `ui/markdown`, `ui/image`, `ui/calendar`, `ui/carousel`,
+  `ui/columnresize`, `ui/reordergrid`. Navigation and overlays: `ui/command`, `ui/menubar`, `ui/navigationmenu`,
+  `ui/sidebar`, `ui/hovercard`. Data and inputs: `ui/avatar`, `ui/avatareditor`, `ui/attachment`, `ui/metriccard`,
+  `ui/marker`, `ui/skeleton`, `ui/aspectratio`, `ui/questionnaire`, `ui/messagescroller`, `ui/message`,
+  `ui/inputgroup`, `ui/inputotp`, `ui/multiselect`, `ui/hierarchypicker`, `ui/buttongroup`, `ui/togglegroup`.
+- Some packages expose `pkg.View(c, label, &state)` (`calendar.View`, `markdown.View`); others a method on the state
+  (`avatar.New().View(c, label)`, `questionnaire.New().View(c, label)`). `go doc github.com/vivaui/viva/ui/<package>`
+  shows which.
+- A page control can sit inside a `ui.Slot` at the rectangle a component painted: keep the slot's size, declare the
+  control with `.Absolute().Left(0).Top(0).Size(...).Hit(id, label)`, and bind a copy (`checked := m.checked`) when the
+  application's dispatcher owns the value. `ui/slot_parity_test.go` keeps this exact for Checkbox, Switch and FormField.
+- Keep a wholly custom surface as `ui.Slot(...).Draw(func(d *ui.DrawContext) { ... })` with `gfx.Canvas` and
+  `Begin*` recipes in package `components`. Its layout and hit model belong to the application; do not rewrite the surface as page
+  declarations merely to use a page control.
+
+### Forms and fields
+
+- A field shown but not edited takes `.ReadOnly(true)`; it keeps its text and look, takes focus, and refuses typing:
+  `ui.TextField(c, &m.release, "Version", "").ReadOnly(true)`.
+- Text fields that just work: `ui.TextField(c, &m.name, "Name", "placeholder")` binds a string of the model, and
+  `ui.TextField(c, &m.query, "Search", "")` binds a `ui.Field` when the program reads the caret or selection too
+  (`m.query.Secure = true` for that field). Typing, caret, selection, clipboard and input methods work; the page's
+  `Config` gives the platform the editor, so no `Config.TextInput` is needed for them. Read a string as `m.name`;
+  read a field with `m.query.Text()` and set it with `SetText("x")`. Do not build `text.Editor`s or snapshots by hand.
+  In a `Row` a field has no width of its own: give it `Grow(1)` or `Width`, or it is invisible.
+  Enter in a field: `if ui.TextField(c, &m.draft, "Message", "Type").Submitted() { m.send(); m.draft = "" }` (true only in the
+  repaint that delivers Enter, not for a click; `OnKey` is not needed). The label (first string) is never empty.
+- Several rows: `ui.TextArea(c, &m.notes, "Notes", "").Height(120)` (Enter is a new line). Arrow keys and Page Up/Down
+  move by row while the platform edits it, and the page routes them; no `OnKey` is needed.
+- Other fields: `ui.TextField(...).Icon(plus)` puts an icon before the text, `.Action(cross, "Clear")` a button at its end
+  (`.ActionClicked()` reads it), `.AutoFocus()` takes the focus as it appears and `.Secure()` makes it a password field.
+  A search box is a TextField with `.Icon(search)` and `.Action(cross, "Clear")`, as above.
+- A form row declared by hand is `ui.FormField(c, &m.proxyField, "Proxy").FillWidth().Children(func() { ... })`: the title
+  and exactly one control child sit in the slot `components.BeginField` uses, at the same rhythm. Keep the
+  `ui.FormFieldState` in the model beside the value; it neither binds the value nor labels the control.
+- A settings form from tags: tag the struct's fields (`form:"Label"`, `choices:"options,nameFunc"`, `placeholder:"..."`)
+  and run `go tool viva form` (or `//go:generate go tool viva form`); it writes `Form(c ui.C) ui.Box`.
+- Focus that lives in the model: `ui.FocusBind(ui.TextField(...), &m.focus, focusSearch)`, where `focusSearch` is a value
+  of the model's own (`const focusSearch = "search"`): setting `m.focus` moves the focus, a user's focus writes back, and
+  `ui.FocusedValue(c, &m.focus)` reads the committed one. The element needs a control or a Hit, and the binding is not for a `Memo`.
+
+### Custom controls, looks and components
+
+- A control of your own (terminal, editor, drawing canvas): `ui.Control(c, "Label", &m.handlers).Grow(1).Draw(m.draw)`;
+  `ui.Handlers` has Key, Pointer, Scroll and, with Role `gfx.RoleTerminal` or `gfx.RoleTextField`, Text for typing
+  and input methods. Keep the Handlers and the draw function in the model; declare no identities.
+  A control with several interactive parts (the stars of a rating, a graph's nodes) declares them as it draws:
+  `d.Canvas.HitWithOptions(m.handlers.Parts().At(i), rect, "Star 3", opts)`; a key, press or wheel on a part reaches
+  the same Handlers with the part as the event's Target (`event.Target.In(m.handlers.Parts())` gives i). A printable key
+  typed while the control or a part has the focus reaches Key with its Text (Key zero), so typeahead needs no extra wiring.
+- A toolbar, or any row or column of controls that is one Tab stop with arrow keys between them:
+  `ui.Row(c).FocusGroup(ui.FocusHorizontal).Children(...)` (`FocusVertical`, `FocusBoth`); Tab reaches the member that had the
+  focus last, the arrows and Home/End move among the members (wrapping), and a text field, combobox or slider inside keeps its own.
+- A control with a look of your own: `ui.ButtonBase`, `CheckboxBase`, `SwitchBase`, `ToggleBase`, `RadioBase`, `TabBase`,
+  `SliderBase`, `SelectBase` and `TextFieldBase` are the controls without their look, bound like their dressed forms; give them
+  Background, Border, Radius and Draw (and Children, for the row-shaped ones). Do not copy a control to restyle it.
+- A part that rarely changes: `ui.Memo(c.KeyInt(id), *item, func() { ... })` is copied from the last
+  paint while that value compares equal: pass the row (or a comparable key of what the function
+  reads), not a counter you must remember to bump.
+- Your own component is a function of the same shape: `func Card(c ui.C, title string, body func()) ui.Box`.
+  Its own small state (whether it is open) is `ui.State[bool](c, "open")`; the application's state stays in the model.
+  A component that places its children by its own rule uses `ui.CustomLayout(c, &m.layout)` and implements `ui.Layout`
+  (`MeasureWidth`, `PlaceWidth`, `MeasureHeight`, `PlaceHeight`); the page keeps identity, focus, hits and clipping.
+- An independent window is a page: `ui.Run` or `ui.NewPage(...).Config(base)` wires its input. A pane of a window is a keyed container in the same page, not a second `Page`; do not draw a page into a slot in application code.
+- A page of the system's web engine (WebKitGTK on Linux, WKWebView on macOS, WebView2 on Windows): put an
+  `app.WebHost` in `Config.Web`, open the page in its `OnReady` (`host.Open(app.WebViewConfig{URL: ...})`, or `HTML`
+  with a `Scheme` that serves your own resources), keep the `*app.WebView`, and in the page give it the room of a slot:
+  `ui.Slot(c).Grow(1).NativeView(m.view.ID())`. It fills the slot inside its clips and scrolls with it; menus, popovers
+  and dialogs are painted above it automatically. The page talks to the app with `window.viva.postMessage(text)` /
+  `viva.onmessage`, and the app with `OnMessage` and `view.PostMessage(text)`. Calls on the host and the page run on the
+  window thread. `Open` fails with `app.ErrUnsupported` when the platform or the installed engine cannot host pages: show
+  something else then.
+
+### Drag and drop
+
+- Any box drags and drops with a `ui.DragState` in the model: declare a `Hit` box with
+  `.DragSource(&m.drag)` and another with `.DropTarget(&m.drag, accept, drop)`. The page routes the pointer;
+  `m.drag.Dragging()`, `Source()`, `Target()` and `At()` paint the gesture, `accept(source, target)` decides,
+  `drop(source, target)` runs on release, and Escape lets go. A press that does not move is still a click.
+  Save the callbacks in the model and do not declare the boxes in a `Memo`. Inside a
+  `ui.Control`'s `Draw`, a part (a card of a custom grid) is a source or target of the same state with
+  `d.DragSource(&m.drag, part, r)` and `d.DropTarget(&m.drag, part, r, accept, drop)`, declared beside
+  `d.Canvas.Hit(part, r)`; a target part needs no `Hit`.
+- For a divider between two panes, use `ui.Splitter` (see "Keys, drag and the mouse"), not a `DragState`.
+
+## Mistakes that compile (and how each is reported)
+
+Run `go vet ./... && viva vet && go test ./...` before you finish. `viva vet` finds these without
+running anything; a test under `app.NewDriver` panics on them where they happen, with the fix.
+
+| You wrote | What goes wrong | Write instead |
+| --- | --- | --- |
+| `for ... { ui.Button(c, "Delete") }` with no Key | a row added above moves the click to another row | `ui.Row(c.KeyInt(item.ID)).Children(func() { ui.Button(c, "Delete") })` |
+| a `ui.C` in a struct field or a global | it is valid only inside the page function | keep the `*ui.Page`, pass `c` down |
+| deleting from the list inside its loop on `Clicked` | the loop still runs over it | `c.After(func() { m.remove(id) })` |
+| `ui.Modal(c, &open, "", ...)` | panics: a dialog needs a title | give it one; it names the dialog for screen readers |
+| two rows with `c.Key("x")` in one parent | panics | key rows by something unique (an ID) |
+| a `ui.Memo` whose function reads something its value does not cover | the part shows stale content | pass the row (or a comparable key of what the function reads); `ui.MemoCheck(true)` in a test panics on it |
+
+A line, or the line above it, with `// viva:ignore unkeyed-button` (or `kept-context`, `memo-value`) silences
+one finding you have checked.
+
+## If it does not compile or panics
+
+Read the first line of the error, find it here, and change the declaration. The message is the
+framework telling you which rule you crossed; do not work around it by moving the call.
+
+| The error or panic | What to write instead |
+| --- | --- |
+| `ui: a Box is used after its paint` | Keep a `gfx.ID` or the page's name across paints, not the `Box`; re-declare to get a new one. |
+| `ui: Modal needs a title` | Pass a non-empty title; it is the dialog's name for assistive technology. |
+| `ui: FormField needs its FormFieldState` | Keep one `ui.FormFieldState` per field in the model and pass `&m.proxyField`, not the value. |
+| `ui: FormField takes one control child` | Wrap the controls in a `Row` or `Column`; the field has one slot. |
+| `ui: a Row, Column or Stack given Hit` | A container with `Hit` needs `Children`, a size, a background or a border, or it is empty. |
+| `ui: two siblings have the key` | Key each row by its item (`c.KeyInt(item.ID)`), not by a constant. |
+| `ui: an element was declared after the page was laid out` | Declare elements in the page function, not in a `Draw` callback or after `End`. |
+| `ui: Effect in a Memo` | Declare the `ui.Effect` outside the `Memo`; a copied part is not declared. |
+| `ui: FocusBind needs an element with an identity` | Give the element a `Control`, a `Hit` or a key before `FocusBind`. |
+| `ui: AutoFocus needs an element with an identity` | The same: a control, or a container after `Hit`. |
+| `ui: Tooltip needs an element with an identity` | The same: a control, or a container after `Hit`. |
+| `cannot use n (variable of type int) as float32` | Every length is a `float32`: `Width(float32(n))`, `Pad(float32(n))`, `Gap(float32(n))`. |
+| `undefined: FocusSearch` / `RoleTerminal` | Define your own focus value (`const focusSearch = "search"`); roles are `gfx.RoleTerminal`, `gfx.RoleTextField`. |
+| `cannot use c (variable of type ui.C) as gfx.Color` | `Ring` takes a color: `Ring(3, theme.Ring)`, not `Ring(3, c)`. |
+| a text field in a `Row` is invisible | A field has no preferred width: give it `Grow(1)` or `Width(...)`. |
+| `undefined: ui.Box` as a constructor | There is no `Box` constructor; a control call returns one: `b := ui.Button(c, "Filter")`. |
+
+## Laying a page out (package github.com/vivaui/viva/ui)
+
+Describe the page; do not compute coordinates.
+
+```go
+func (m *model) page(c ui.C) {
+	ui.Column(c).Fill().Pad(24).Gap(12).Children(func() {
+		ui.Text(c, "Title").FontSize(20).Bold()
+		ui.Paragraph(c, description, 3).Muted()          // wraps; at most 3 lines
+		ui.Row(c).Gap(8).Items(ui.Center).Children(func() {
+			ui.Text(c, "Notify me")
+			ui.Spacer(c)                               // pushes what follows to the far edge
+			ui.Switch(c, &m.notify, "").Small()
+		})
+		ui.Scroll(c).Grow(1).Gap(4).Children(func() { /* long content */ })
+		ui.Row(c).Gap(8).Justify(ui.End).Children(func() {
+			ui.Button(c, "Cancel").Outline()
+			if ui.Button(c, "Save").Clicked() { m.save() }
+		})
+	})
+}
+```
+
+### Page, containers and space
+
+- The window's `*ui.Page` is made by `ui.Run` or `ui.NewPage` and lives with the
+  window; the page function only declares with `c`. A `ui.C` and the `Box`es of one
+  paint are valid only while that paint runs.
+- Containers: `Row` (left to right), `Column` (top to bottom), `Stack` (on top of each
+  other), `Grid(minCell)` (as many equal columns as fit), `Flow` (a row that wraps onto
+  new lines; `LineGap` sets the space between lines, else it is `Gap`), `Scroll` (a clipped
+  column taller than itself). Leaves: `Text`, `Paragraph`, `Wrap`, `Spacer`, `Divider`, `Icon`,
+  `Image(bitmap)` (a `gfx.Bitmap` such as `app.FileIcon` returns, 16 px square unless sized), `Button`, `Checkbox`, `Switch`, `Slot`, `Progress(fraction)` (a bar; `.Indeterminate()` for unknown length),
+  `Spinner()`, `Splitter(&state)` (see Keys, drag and the mouse), `Slider(&state)` (a number picker, see below).
+- Size: nothing = as big as its content; `Width`, `Height`, `Size` fix it; `FillWidth`,
+  `FillHeight`, `Fill` take the room; `Grow(n)` shares free room along the container;
+  `Shrink(n)`; `Basis(px)` is what an element starts from before free room is shared;
+  `WidthPercent`, `HeightPercent` take a share of the container; `MinWidth`, `MaxWidth`,
+  `MinHeight`, `MaxHeight` bound it (room a capped element cannot take goes to the others,
+  as in CSS: `Grow(1).MaxWidth(470)` beside a `Spacer()` works); `MaxWidthPercent(70)` and `MaxHeightPercent` cap at a share of the container (a chat bubble).
+- Space: `Pad`, `PadX`, `PadY`, `PadTop`, `PadRight`, `PadBottom`, `PadLeft`, `PadSides(top,right,bottom,left)`;
+  `Margin`, `MarginX`, `MarginY`, `MarginTop`, `MarginRight`, `MarginBottom`, `MarginLeft`, `MarginSides`;
+  `Gap` between children. `Pad`, `Border` and `Background` work on a `Text` or `Paragraph` too
+  (a chip, a badge, a chat bubble). Every length is a `float32`: `Width(float32(n))`, never an `int`.
+- Place: across a container children stretch by default; `Items(ui.Center)` or
+  `ui.Start`/`ui.End`/`ui.Stretch` changes that; `ui.Baseline` lines a Row's children up
+  on their first line of text; `Self(...)` for one child;
+  `Justify(ui.Center|End|Between)` places what is left along it; `Center()` does both.
+
+### Look, effects and states
+
+- Look: `Background`, `Radius`, `Border(width, color)`, `Shadow(gfx.ShadowMD)` (a drop shadow under the fill; `ShadowXS` to `ShadowLG`), `Clip`. A circle (an avatar, a dot) is a
+  square box with `Radius(size/2)` and `Center()`: `ui.Row(c).Size(32, 32).Radius(16).Background(theme.Primary).Center().Children(func() { ui.Text(c, "AB") })`.
+- Effects, all typed and checked by the compiler (there is no class string): `Ring(3, theme.Ring)` draws a line around the
+  outside without taking room (a focus ring); `Opacity(0.5)` fades the element and everything in it (it is still laid out
+  and clickable); `Gradient(ui.ToBottomRight, from, to)` and `GradientStops(angle, gfx.Stop(0, a), gfx.Stop(1, b), ...)`
+  fill the element, corners included, over `Background` and under `Border`; `Dashed()` breaks the `Border` line into
+  equal dashes and gaps (a drop target's frame), and `Look{}` has `Dashed(bool)` too.
+- States: an element with an identity (`Hit`, which also makes it focusable) changes with `Hover(ui.Look{}.Background(theme.Hover))`, `Pressed(...)` and
+  `Focus(ui.Look{}.Ring(3, theme.Ring))` (keyboard focus, as `:focus-visible`), plus `Focused(...)` for any focus (a click in a text field focuses it
+  without making it visible; a group box that frames its field follows the field with `StateFrom(field)`). A `Look` lists only what differs from rest and has `Background`, `Border`,
+  `Color`, `Ring`, `Shadow` and `Opacity`; looks combine field by field (Focus, then Hover, then Pressed win).
+  `Transition()` fades between them over the theme's motion and schedules nothing while at rest. `StateFrom(row)` makes a
+  child follow its row's state: a pencil that shows on hover is
+  `ui.Icon(c, edit).Opacity(0).StateFrom(row).Hover(ui.Look{}.Opacity(1))`.
+- Finished, themed examples to copy (settings row, list row with a hover action, avatar, badge, stat card, gradient hero, icon button, empty state): <https://github.com/vivaui/viva/tree/main/examples/recipes>, with guidance in <https://github.com/vivaui/viva/blob/main/docs/skills/building-with-viva/recipes.md>.
+- Icons move inside their box, not the box: `ui.Icon(c, glyph).IconTransform(gfx.IconTransform{Rotate: radians, Scale: 0.9, Offset: gfx.Point{X: 2, Y: 0}})`
+  turns and scales the glyph about the center of its box and moves it after that, while the row keeps its place, its
+  size and its hit region. The zero `gfx.IconTransform` is the still icon, and a paint that passes one costs nothing.
+- A glyph's parts move on their own: `glyph.Contours()` splits the glyph into one icon per contour, and
+  `IconTransform.Parts` takes one `gfx.IconPart` per contour that moves (`Contour: n`, `Offset: gfx.Point{Y: 2}`), so
+  that contour moves while the others stay. Contours are numbered in drawing order, so a regenerated glyph can renumber
+  them; pin the contours you address with a test that paints the part and checks where it lands. Filled `Layers` are
+  not contours: they paint once, unchanged, while parts move.
+- A hover gesture has a small caller-owned driver: keep a `components.IconHover` and declare
+  `id := ui.ID(c); ui.Icon(c, glyph).Hit(id, "Action").BindIconHover(ui.BindIconHover(&m.hover, id))`. It waits for the pointer
+  to rest, plays once, and finishes even if the pointer leaves; `IconHover.Progress` exposes the linear progress
+  when a glyph needs its own motion. `BindIconHover` only moves the glyph inside its box.
+- Window: in a `WindowCustomTitlebar` window nothing moves the window unless you say where: `ui.Row(c).Height(36).MovesWindow().Children(...)` on the top bar
+  (controls inside it still take their own clicks; a menu or dialog open over it is dismissed by a click there and the window moves once the pointer drags).
+
+### Text and icons
+
+- Text: `FontSize`, `Weight`, `Bold`, `Color`, `Highlight`, `Muted`, `Mono`, `MonoFace`, `TextCenter`, `TextEnd`, `TextDirection`, `LineHeight`;
+  `Ellipsis()` keeps a Text to one line and ends it with … when it does not fit; `MaxLines(n)` lets a Text
+  break into at most n lines (the last ends with …), `ui.Wrap(c, text)` into as many as the width needs. Lines
+  break where Unicode (UAX #14) allows: at spaces, after hyphens and slashes, between CJK characters (kinsoku
+  rules apply), between the syllables of Thai, Lao, Khmer and Myanmar, at the spaces of Korean; a word wider than
+  the line breaks after a `/ - _ .` or between characters, never inside an emoji, a conjunct or a letter with its
+  marks. Hebrew, Arabic and other right-to-left text is reordered (UAX #9), aligned to the start of its paragraph
+  (the right edge; `TextEnd()` picks the other) and given the paragraph's direction on every line; `TextDirection`
+  overrides it. The height follows the width. Viva measures text with its own metrics,
+  the same on every platform, and draws the platform's glyphs at that width: a button as wide as its label, a tab, a
+  table column sized to content and every line break are the same on macOS, Windows and Linux, so do not size by a
+  platform's font (or special-case a platform) to make text fit.
+
+### Buttons and controls
+
+- Buttons (the plain one is the primary; there is no `Primary()`): `Secondary`, `Outline`, `Ghost`, `Link`, `Destructive`, `DestructiveOutline`,
+  `XSmall`, `Small`, `Large`, `IconOnly`, `Disabled(cond bool)` (so `ui.Button(c, "-").Disabled(m.n <= 0)`, no `if`).
+- A control call returns a `ui.Box` (there is no `ui.Box` constructor); keep it when you need it later: `filter := ui.Button(c, "Filter")`.
+  A bound Checkbox, Switch, Choice or Tabs writes its value where it is declared, so a click you do not read still changes it;
+  read `.Changed()` for work that follows the change: `if ui.Switch(c, &m.auto, "Auto-scroll").Changed() { m.persist() }`.
+  `Label` is the name a screen reader or a test finds the control by, so give one to every control that has no text of
+  its own, and put the visible caption in a `ui.Text` beside it. A header row of named controls is a `Row` of `Button`s
+  (`.Ghost()`) or `Hit` boxes; each is found by its label.
+- Controls with your own look: every control with the theme's look has a Base, the same control without one, and the look is then
+  the element's own. `ui.ButtonBase(c, "name")` (give it `Children`), `ui.TextFieldBase(c, &m.cell, "Cell", "")` for a
+  single-line field without a look, and `ui.TextArea` for the multi-row field, `ui.CheckboxBase(c, &m.on, "name")`, `ui.SwitchBase` and `ui.ToggleBase(c, &m.bold, "Bold")` the
+  two-state controls, `ui.SliderBase(c, &m.volume)` a slider whose thumb you draw where `state.Fraction()` says, and
+  `ui.TabBase(c, &m.tab, tab, label)`, `ui.RadioBase(c, &m.mode, option, label)` and `ui.SelectBase(c, &m.size, sizes, nil)` the items of
+  composites. A select with your own look: `sel := ui.SelectBase(c, &m.size, sizes, nil)`, draw the trigger in its `Draw`, and
+  when `list, ok := sel.Popup()` draw the open list too (`sel.Part(i)` is option i's rectangle); its state, `Picked`, popup, focus
+  scope, Escape and type-ahead are the select's.
+  Dress any element with the calls it takes (`Pad`, `Border`, `Radius`, `Background`, `Shadow`, `Hover`, `Focus`; on a text field also
+  `FontSize`, `Weight`, `Color`, `Mono`/`MonoFace` and `LineHeight`), and draw what those cannot say with
+  `.Draw(func(d *ui.DrawContext) { ... })` (after the background, before the children) or `.DrawOver(...)` (after the children);
+  `d.Canvas`, `d.Rect` (laid out, so no `Slot` and no `Rect()` after the paint), `d.State` (a `gfx.State`: `Hovered`, `Pressed`,
+  `Focused`, `FocusVisible`, `Disabled`, `Checked`; `Box.State()` is the same while declaring), `d.Label` and `d.Fade(color)` are yours.
+  A Draw callback only paints and may run more than once a paint. The theme's look is a pure function you can start from:
+  `components.TextEntryRecipe`, `CheckboxRecipe`, `SwitchRecipe`, `ButtonRecipe`. `ui.TextField` and `ui.TextArea` take `Radius`,
+  `Border`, `Background`, `Shadow` and `Pad` too: what you set replaces the recipe's, the rest stays, so `ui.TextField(c, &m.x, "X", "").Radius(0)` is a square shadcn field.
+- Interactive rows and cards: `ui.Row(c).Pad(8).Hit(ui.ID(c), name).Children(func() { ui.Text(c, name) }).Clicked()`.
+  `ui.ID(c)` names the next element of the page (a `Hit` box, a `Control`, a recipe); a `c.Key`/`c.KeyInt` before it names
+  a row, and `c.Part("word")` names a part of a component. `HitWith(id, label, gfx.HitOptions)` adds `Cursor`
+  (`gfx.PointerCursorResizeHorizontal`, `gfx.PointerCursorHand`, ...), `Selected`, `Disabled` and `Role`. `Hit` only makes a
+  pointer target and an accessibility name; it paints nothing, so a container with `Hit` and no `Children` (and no size or
+  background) panics at the first paint. A part of a row a component owns, such as a Tree row's name that carries the
+  row's `ContextMenu`, is `ui.Text(c, name).LabelFor(m.tree.RowID(i))`: a label of the row, which a click, the hover
+  and a right click reach as the row, where a `Hit` would be a control of its own that takes the row's clicks.
+- A segmented choice among labels: `if ui.Choice(c, &m.theme, themes, nil).Changed() { m.saveTheme() }`; the choice writes
+  the option itself, so `m.theme` is the selected value (`Theme.String` names options that are not strings).
+  `ChosenIndex()` reports the option index a click chose on a `ui.Choice` strip (the call the bound form uses itself), for
+  a caller that needs the index. `ui.Tabs(c, &m.tab, tabs, nil)` is a tab strip with the same write; declare the active
+  tab's content after it, for the value it wrote, and `TabClicked()` reports the tab index a click chose when you need the
+  index rather than the value. `ui.Divider(c)` has no vertical mode: put it in a `Row` to divide horizontally
+  (`Box.Vertical()` is for tabs, not a Divider).
+
+### Tables
+
+- A table: the data is a `ui.TableRows` in the model (`[][]string`, passed as `&m.data`) or your own pointer type with
+  `Len() int` and `Cell(row, col int) string`; not a plain slice of structs. `ui.Table` makes its row and header scopes
+  from the state when the spec leaves them zero:
+
+  ```go
+  columns := []components.TableColumn{
+      {Width: 160},
+      {}, // no width: the last column takes the rest
+  }
+  t := ui.Table(c, &m.table, ui.TableSpec{Headers: []string{"Name", "Age"},
+      Sortable: []bool{true, true}, Source: &m.data, Striped: true, Columns: columns})
+  if i, ok := t.RowClicked(); ok { m.table.Select(i) }       // Selected() is the row or -1, ClearSort() unsorts
+  if col, ok := t.HeaderClicked(); ok { m.table.SortBy(col); m.sortData() } // Sort() returns (column, descending, ok)
+  ```
+
+  A header cell is clickable only where `Sortable[c]` is true; `Headers` alone draws a title nobody can click. In a
+  `ui.Scroll` the table is as tall as its rows and only visible rows are read; with `Height`, `Fill` or `Grow` it scrolls
+  its rows under a fixed header and draws its own hover bars: `Scrollbar` names the bar's hit, `ScrollbarLabel` names it
+  for assistive technology, `ScrollbarSize` sets its thickness (else the page's `PageConfig.ScrollbarSize`) and
+  `ScrollbarGutter` keeps a strip beside the columns for it. An application painting its own vertical bar sets
+  `HideHoverScrollbars: true` to omit the anonymous vertical hover thumb only; the horizontal overlay, gutter, wheel,
+  and an explicitly identified draggable `Scrollbar` are unchanged. The page gives the wheel to a self-scrolling table under the pointer; give the `app.Config` passed to
+  `ui.Configure` `OnKey: m.table.Key` for Up/Down/Page/Home/End selection (a host that routes its own scroll gives
+  `m.table.Wheel` the wheel).
+
+### Tabs and select
+
+- Tabs: `if ui.Tabs(c, &m.tab, tabs, nil).Line().Changed() { ... }`, then declare the active tab's content under it with an
+  ordinary `switch m.tab`. `Line()` is the underlined variant (it draws 5 px under the strip), `Vertical()` stacks the tabs,
+  and `TabIcons(func(i int) gfx.Icon)` puts an icon before each label without a second constructor. A strip too narrow for
+  its labels adds `TabIconOnly()`: it paints the icons alone and keeps each label as the tab's accessible name and hint.
+  `Choice`, `Tabs` and `Select` write the value in the declaration, so disable them with an `if`, not a chained
+  `.Disabled`: `if !m.locked { if ui.Tabs(c, &m.tab, tabs, nil).Changed() { ... } }`. `Tabs` and `Select` also honor a
+  chained `.Disabled` for input; `Choice` ignores it, so never rely on it there.
+- A drop-down select: keep the value in the model; whether the list is open is the Select's own state:
+  `if ui.Select(c, &m.size, sizes, nil).Placeholder("Size").Changed() { m.load(m.size) }`. The list is placed under the
+  trigger (above it when there is no room), painted over everything, and scrolls when it is taller than the window; the page
+  routes the wheel to it while it is open. `.ListMaxWidth(px)` and `.ListMaxHeight(px)` cap the open list: its width
+  never grows past the cap (nor shrinks below the trigger), and its height counts the padding and the scroll arrows, so
+  the list shows the rows that fit and scrolls for the rest. `.DisabledOptions(flags)` takes a `[]bool` you keep, indexed like the options: a true
+  entry is dimmed, takes no click or focus and is skipped by type-ahead. `.ButtonRecipe(fn)` gives one Button its own look (colors, radius, ring) where `PageConfig.Styles.Button` dresses them all, and `.SwitchRecipe(fn)` does the same for one Switch against `Styles.Switch`; declare `fn` once, not as a closure per paint. `.XSmall()` makes the trigger shorter, and `.Hint(text)` gives it a description for assistive technology. `ui.Combobox` takes the same arguments plus a label and filters as the user types.
+
+### Slots, grids and absolute placement
+
+- A page of the system's web engine inside the window (WebKitGTK on Linux, WKWebView on macOS, WebView2 on Windows):
+  put an `app.WebHost` in `Config.Web`, open the page in its `OnReady` (`host.Open(app.WebViewConfig{URL: ...})`, or `HTML`
+  with a `Scheme` that serves your own resources), keep the `*app.WebView`, and in the page give it the room of a slot:
+  `ui.Slot(c).Grow(1).NativeView(m.view.ID())`. It fills the slot inside its clips and scrolls with it; menus, popovers
+  and dialogs are painted above it automatically. The page talks to the app with `window.viva.postMessage(text)` /
+  `viva.onmessage`, and the app with `OnMessage` and `view.PostMessage(text)`. Calls on the host and the page run on the
+  window thread. `Open` fails with `app.ErrUnsupported` when the platform or the installed engine cannot host pages: show
+  something else then.
+- Grid children can cover several cells: `.ColSpan(n)` and `.RowSpan(n)` (columns are equal; the next child goes in
+  the first free cell after the previous one, skipping cells a span has taken).
+- Take a child out of the flow with `.Absolute()` and place it by edges in its container: `.Top(8).Right(8)`
+  (`Bottom`, `Left`; a negative edge reaches outside), `.Inset(0)` for all four, with `Width/Height/Size` or both
+  edges of an axis to stretch between them. It takes no room, does not move its siblings, is painted and clicked
+  above them, and edges do nothing without `.Absolute()`. A badge on an avatar, a close button on a card, an overlay
+  (`ui.Stack(c).Children(...)` holding it), a toast stack at the bottom right of the page
+  (`ui.Column(c).Absolute().Right(16).Bottom(16).Gap(8)`).
+- Your own painting inside a laid-out page: `ui.Slot(c)` reserves a rectangle, and `Box.Rect()` says where it ended up
+  once the page is laid out. Paint it in a `Draw` callback (`Box.Draw(func(d *ui.DrawContext) { ... })`), which is given
+  the element's `Rect` in its place, or use the rectangle in the same event pass after the page function returns; do not
+  keep the `Box` for a later paint. `c.Canvas()` is the canvas for measuring or reading pointer and focus state, and
+  `c.Bounds()` is the rectangle the whole page was laid out in, known before the page returns.
+
+### Sliders and scrolling
+
+- A slider (volume, zoom, a threshold): a `ui.SliderState` in the model holds the number in `Value` (set it before the first paint), and
+  `if ui.Slider(c, &m.volume).Range(0, 1).Step(0.05).Label("Volume").Changed() { m.player.SetVolume(m.volume.Value) }` draws it
+  (`Range` defaults to 0..100, `Step` is optional, `Vertical()` makes it tall, `Disabled(cond)` dims it, 16 high and as wide as its column
+  or 160 in a row unless given a `Width`). A drag, a click on the track and the arrow keys all keep `Value` inside the range; the page
+  routes the focused slider's keys, so no `Config.OnKey` is needed. `Changed()` is true in the one paint that delivers a user's change,
+  so call it last in the chain. Do not draw a track from a `Slot` and `Progress` by hand.
+
+### Coordinates
+
+- Do not write `gfx.Rect{X: ..., Y: ...}` arithmetic for ordinary parts of a page. It breaks
+  when a label gets longer or the window gets narrower; a page laid out with ui does not.
+
+## Component authoring (page functions)
+
+A component is a function of the page, declared where it is used: `func Card(c ui.C, title string, body func()) ui.Box`.
+It composes the same `ui` elements as the application, keeps its own small state with `ui.State[T](c, "open")`, and never
+declares a `gfx.Tree`, opens a window or holds a `C` past the paint. A hit or a test names it with `ui.ID(c)` (the next
+element's identity) or `c.Part("word")` when the name must be stable.
+
+- A component from `github.com/vivaui/viva/components` with no `ui` wrapper is painted in a slot: declare `ui.Slot(c)` and
+  paint the component's `Paint...` function in the slot's `Draw` callback (`components.PaintInput(d.Canvas, *d.Theme, d.Rect, snapshot)`).
+  For a control whose input the page must route, declare its `ui` element or its Base (`ui.ButtonBase`, `ui.TextFieldBase`, ...).
+  Do not copy a control to restyle it.
+
+## Keys, drag and the mouse
+
+The page routes the window's keys, pointer, wheel and text input to the controls it declared, so an application writes
+no handler for the ordinary cases. `Config.OnKey func(gfx.KeyEvent) gfx.EventResult` still receives the keys the page did
+not take, for the control that has keyboard focus (a table's `TableState.Key`, a terminal of your own), so a key handler
+on a page where nothing is focused never runs. For "Escape closes this", declare a `Modal`, `Popover`, `Menu` or
+`Drawer`; they dismiss themselves, and `OnKey` never sees Escape for an unfocused page. `gfx.EventResult{Repaint: true}`
+asks for a repaint, `Handled: true` stops the default handling; it is a struct, there is no `gfx.Handled` constant.
+
+`Config.OnPointer func(gfx.PointerEvent) gfx.EventResult` receives pointer input the page does not model: `e.Kind` is
+`gfx.PointerDown`, `PointerMove`, `PointerUp` or `PointerExit`, `e.X`/`e.Y` are window pixels, `e.Target` is the identity
+pressed (it stays the pressed one while a drag runs). Two panes with a draggable divider need none of it: keep a
+`ui.SplitterState` in the model, give the first pane its `Pos` and declare `ui.Splitter(c, &m.split)` between them (the
+pointer is captured, the resize cursor shows, `Mins` bounds both panes, and `SplitterState.Key` given to the config's
+`OnKey` adds the arrow keys; `m.split.Dragging()` says a drag is running):
+
+```go
+m.split = ui.SplitterState{Pos: 240} // once, in newModel
+ui.Row(c).Fill().Children(func() {
+	ui.Column(c).Width(m.split.Pos).Children(func() { /* left pane */ })
+	ui.Splitter(c, &m.split).Mins(120, 200)
+	ui.Column(c).Grow(1).Children(func() { /* right pane */ })
+})
+```
+
+(`Splitter` in a `Column` divides top and bottom; the first pane then gets `Height(m.split.Pos)`.)
+`.SplitterThickness(1)` makes the divider take one pixel of the layout, as a hairline between the panes, while the
+pointer keeps the eight-pixel strip around it.
+
+## Animation and time
+
+Nothing runs by itself. A paint that must be followed by another (a progress bar, a spinner) calls
+`c.Canvas().RequestFrame()` (or `RequestFrameIn(d)`) and keeps asking while it is still moving; when it stops asking the
+window goes idle again. `c.Canvas().Now()` is the animation clock (a `time.Duration`): store `began := c.Canvas().Now()`
+when the thing starts and derive the state from the difference in the page function, never from a ticker or goroutine.
+`c.Canvas().Animate(id, slot, target, gfx.DefaultMotion())` eases a value toward a target for you (hover fades, sliding
+indicators). Ask it for `gfx.EaseLinear` and it becomes a clock for a motion with keyframes of your own, each segment
+eased by `gfx.CubicBezier(x1, y1, x2, y2)` (the CSS curve): a press that turns an icon and settles it back is one click,
+one slot and one map of stop times.
+
+```go
+canvas := c.Canvas()
+if m.running {
+	fraction = min(float32(canvas.Now()-m.began)/float32(3*time.Second), 1)
+	if fraction < 1 { canvas.RequestFrame() } else { m.running, m.done = false, true }
+}
+ui.Column(c).Fill().Pad(24).Gap(12).Children(func() {
+	if ui.Button(c, "Start").Clicked() { m.running, m.began = true, canvas.Now(); canvas.RequestFrame() }
+	ui.Row(c).Gap(12).Items(ui.Center).Children(func() {
+		ui.Progress(c, fraction).Grow(1).Height(8)   // ui.Progress(c, 0).Indeterminate() when the length is unknown
+		if m.running { ui.Spinner(c) }               // turns by itself; asks for frames only while on screen
+	})
+})
+```
+
+`Progress` and `Spinner` need no `RequestFrame` of yours; the animation you drive from your own state (the fraction above) does.
+
+## Several windows
+
+`app.RunCanvas` runs one window. For more, `app.RunApplication(func(a *app.Application) error {...})` calls its
+function once on the event-loop thread; open windows there or from a click, each with its own page, config and canvas.
+Make every window a `ui.Page` and open it with `w, err := ui.OpenWindow(a, config, ui.PageConfig{View: m.inspector})`:
+it makes the page and the canvas, and a page reaches its application with `ui.Application(c)`, so a click opens another
+window without the model keeping `a`. `w.Close()` closes one (and `w.Closed()` says whether it is gone; it is true for a
+nil window); `a.Quit()` ends everything. Keep `newConfig(m)` for the main window so tests still drive it
+(`a.OpenWindow(config, new(gfx.Canvas))`); every other window is a `ui.OpenWindow`. To repaint another window after the shared model changed, give it an `app.Invalidator` (`config.Invalidator =
+inv`, declared as `&app.Invalidator{}`, the zero value works) and call `inv.Invalidate()`; `Configure` makes one when
+neither the page nor the base config has it.
+
+```go
+err := app.RunApplication(func(a *app.Application) error {
+	m := newModel()
+	var inspector *app.Window
+	m.openInspector = func() { // set before the window opens; called from a click on the event-loop thread
+		if inspector.Closed() {
+			// func (m *model) inspector(c ui.C)
+			inspector, _ = ui.OpenWindow(a, app.Config{Title: "Inspector", Width: 420, Height: 320}, ui.PageConfig{View: m.inspector})
+		}
+	}
+	m.closeInspector = func() { inspector.Close() }
+	config := newConfig(m) // ui.NewPage(ui.PageConfig{View: m.page}).Config(...)
+	config.OnClosed = a.Quit // closing the main window ends the program
+	_, err := a.OpenWindow(config, new(gfx.Canvas))
+	return err
+})
+```
+
+## The theme (gfx.Theme; `gfx.LightTheme()`, `gfx.DarkTheme()`)
+
+Colors, all `gfx.Color`: `Background`, `Foreground`, `Card`, `CardForeground`, `CardElevated`, `Popover`,
+`PopoverForeground`, `Muted`, `MutedForeground`, `Border`, `Hover`, `Input`, `Primary`, `PrimaryForeground`,
+`Selection`, `SelectionForeground`, `Secondary`, `SecondaryForeground`, `Accent`, `AccentForeground`, `Ring`, `Success`, `Danger`, `DangerForeground`, and
+`Chart` (an array of five). There is no `Surface`, `Text` or `Error`: use `Card`, `Foreground`, `Danger`.
+A `gfx.Color` is `{Red, Green, Blue, Alpha float32}` with each in 0..1 (so `gfx.Color{Alpha: 0.5}` is a black scrim);
+it has `Mix(other, t)`, `Over(backdrop)` and `WithAlpha(a)`, and no `R` or `A`. To write a color of your own, `gfx.RGB24(0x0a84ff)`
+(an integer constant, no string to parse), `gfx.RGB(10, 132, 255)` or `gfx.RGBA(10, 132, 255, 0.5)`; take theme colors where you can. A dark window is `gfx.DarkTheme()` in place
+of `gfx.LightTheme()`: keep the theme in the model (`m.theme`) and give it to the page with
+`ui.NewPage(ui.PageConfig{View: m.page, Theme: &m.theme})`; the page reads it through `c.Theme()`, and a change to the
+value is the next paint's theme. `PageConfig.Background` fills the window with a color other than the theme's
+`Background`.
+`theme.Metrics` has `ControlHeight`, `RadiusControl`, `RadiusSurface`, `FontSizeS`, `FontSizeM`, `FontSizeL`,
+`PadControlX`, `PadSurface`, `GapItem`. Take colors and sizes from the theme rather than writing literals.
+
+## Components (package github.com/vivaui/viva/components)
+
+Use them from `github.com/vivaui/viva/components` directly: Button, Checkbox, Switch, Input, Table, Tabs,
+Dialog, Popover, Command, Calendar, Pagination, Progress, Tooltip and more; importing the
+package costs nothing until you call one. To change a component beyond its options, copy it
+into your project with `viva add <name>` (`viva list` shows every name; what it calls into is
+copied with it). They take a
+`gfx.Theme` (`gfx.LightTheme()`, `gfx.DarkTheme()`) and a rectangle. In a page, put one in a
+`ui.Slot(c)` and paint it from the slot's `Draw` callback, where `d.Rect` is the slot's rectangle.
+
+Painting your own thing in a slot: `ui.Slot(c).Grow(1).Draw(func(d *ui.DrawContext) { ... })`, with `d.Canvas.Fill(rect, color)`, `Rounded(rect, radius, color)`, `Border`, `RoundedBorder`, `Elevate(rect, radius, gfx.ShadowMD)` (a drop shadow: call it before the surface),
+`DrawPath` and `d.Canvas.Label(text, rect, gfx.TextStyle{Size: 14, Color: c})` (`LabelCenter` is the same, centered) are all of
+it; there is no arc, circle or line call (a circle is a `Rounded` square, or a `Box` with `Radius`). `d.Fade(color)` applies the
+element's opacity to a color you supply, and `d.DashedBorder(rect, radius, 1, d.Fade(color))` paints a dashed frame the
+element fades with.
+For tabs, tables and text fields use `ui.Tabs`, `ui.Table` and `ui.TextField` above, not the components by hand.
+
+## Background work
+
+A goroutine never touches the window. Work that belongs to the page — a directory listing, a
+request for the selected host — is a `ui.Effect`, not a goroutine of your own:
+
+```go
+var load = ui.NewEffect[dirListing, string](func(ctx context.Context) (dirListing, error) { ... })
+
+func (m *model) page(c ui.C) {
+	ui.Effect(c, m.load, m.dir) // the key: a new directory cancels the old run
+	if listing, err, ok := m.load.Take(); ok {
+		m.apply(listing, err)
+	}
+}
+```
+
+The run gets a context, must return when it is done, and must not touch a `C`, `Box` or `Page`.
+The same key does not start again; a new key cancels the old run and starts the new one at once, so a
+run that is slow to return can overlap it. `.Sequential()` on the state waits for the old run to
+return before starting the next, and only the latest key declared while it waits runs.
+`ui.NewEffectKeyed` passes the key a run started for to the run function. A paint that stops declaring
+it cancels it; closing the window cancels all of them. `Take` reads the result once, on the window's
+thread, after the effect is declared, and the page wakes itself when the result lands. One state per
+page, and not inside a Memo. A page you draw into a window of your own takes that window's
+`PageConfig.Invalidator` and calls `page.Close()` when it goes away.
+
+A goroutine of your own, for something with no page key (a long-lived watcher), stores its result
+under a lock and calls `invalidator.Invalidate()` (`Config.Invalidator`); `Config.OnWake` copies
+the result into the model on the window's thread before the repaint.
+
+## Testing
+
+`app.NewDriver(ui.Configure(page, config()), nil)` runs the real application with no window
+(`ui.NewPage(ui.PageConfig{View: m.page})` makes the page):
+`driver.Click(x, y)`, `Type`, `Key`, `Move`, `Scroll`, `Resize`, then `driver.Snapshot()` for the
+labels, hits and rectangles painted. main_test.go clicks a control by its name and reads
+the labels; copy it. Test behaviour a user sees (the count changed, the row opened), not
+pixel positions.
+
+## Check it without a window
+
+A test is the first check; the picture is the second. Add a file guarded by the tag so
+release builds never contain it:
+
+```go
+//go:build vivahead
+
+package main
+
+import _ "github.com/vivaui/viva/headless/auto"
+```
+
+```sh
+go build -tags vivahead -o /tmp/app .
+VIVA_HEADLESS=1 HOME=$(mktemp -d) /tmp/app
+```
+
+The program then reads one command per line from stdin. The ones that find mistakes fastest:
+
+| Command | What it tells you |
+| --- | --- |
+| `layout` | text clipped, spilling out of its control, or over other text |
+| `tree` | every control with role, name, value and state (`focused`, `disabled`, `covered`, ...) |
+| `texts` | every painted string, to see what the frame actually says |
+| `click "Save"` | click the control with that accessible name (also `id:...`, `role:name`) |
+| `expect text "Saved" within 1000` | wait for a text; fails with what the frame has instead |
+| `expect layout clean` | no clipped or overlapping text at the current size |
+| `expect named` | every interactive control has an accessible name |
+| `shot /tmp/a.png` | the frame as an image, when the look itself matters |
+
+When a step fails: a control is not found, run `tree`; text is cut off, run `layout`; the
+focus is wrong, run `focus`; a press does nothing, look for `covered` in `tree`. Prefer a
+script ending in `expect` lines to one you read by eye. The complete command list is the
+comment above `Serve` in `headless/control.go`; do not copy it into your own docs.
+
+## Examples
+
+The complete programs under `examples/guides` are compiled and tested; read the nearest one
+before composing from scratch:
+
+- `hello` — the smallest window and a click.
+- `layout` — rows, columns, growth, padding and alignment.
+- `textfield` — a bound field, typing, Enter and focus.
+- `input` — pointer, keyboard, a list with a context menu and a splitter.
+- `overlay` — a modal, a popover and a drawer.
+- `theming` — light and dark themes and theme tokens.
+- `table` — a fixed header, sortable columns, a selected row and a scrolling body.
+- `windows` — a custom title bar and a second window.
+- `drawing` — slots, a canvas and custom painting.
+- `page` — a filter, a scrolling list of hosts and a progress bar, written as a page.
+- `background` — a `ui.Effect` and a goroutine that reports through an `Invalidator`.
+- `webview` — the system web engine in a slot.
+
+The finished components (settings row, list row, avatar, badge, stat card, hero, icon button,
+empty state, dimmable section) are under
+<https://github.com/vivaui/viva/tree/main/examples/recipes>, with `recipes.md` beside the skill.
+
+## Rules
+
+- Allocation-conscious: no `fmt.Sprintf` per frame for text that has not changed if it is in a
+  hot path; keep the strings in the model.
+- No reflection, no `map[string]any` for UI state, no goroutines started from a page function by
+  hand: page work is a `ui.Effect`.
+
+## Limits to know
+
+- Controls and containers laid out by package ui are painted when the page function returns
+  (`Page.Draw`), before whatever a `Slot` paints in its `Draw` callback. Hit order follows paint order, so
+  declare overlapping interactive things in the order you want them to win.
+- A `Border` is inside the box (as CSS `border-box`): it takes its width out of the padding area.
+  `Stroke(width, color)` draws the same line but takes no room. `HitOutset(top, right, bottom, left)` makes the
+  click region reach beyond the painted rectangle (an inset rounded row that clicks across its whole width). `HitExact()` makes a Checkbox or Switch's click target its laid-out slot instead of the enlarged target around its square or track.

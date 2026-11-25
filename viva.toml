@@ -1,0 +1,7 @@
+[app]
+name = "todo-mcp"
+id = "com.todomcp.app"
+version = "0.1.0"
+executable = "todo-mcp"
+package = "."
+icon = "assets/icon.png"
