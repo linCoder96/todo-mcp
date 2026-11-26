@@ -201,6 +201,7 @@ func toListQuery(in listInput) store.ListQuery {
 	query := store.ListQuery{
 		Status:   in.Status,
 		Priority: in.Priority,
+		Archived: in.Archived,
 		Filters:  in.Filter,
 		Sort:     in.Sort,
 		Limit:    50,

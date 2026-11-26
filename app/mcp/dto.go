@@ -22,13 +22,14 @@ type createInput struct {
 // listInput 对应 list_tasks 入参；缺省 limit/offset 由 handler 填默认值。
 // filter/sort/group_by 直接复用 store 的类型（协议形状一致）。
 type listInput struct {
-	Status   *int             `json:"status,omitempty"`
-	Priority *int             `json:"priority,omitempty"`
-	Limit    *int             `json:"limit,omitempty"`
-	Offset   *int             `json:"offset,omitempty"`
+	Status   *int               `json:"status,omitempty"`
+	Priority *int               `json:"priority,omitempty"`
+	Archived *bool              `json:"archived,omitempty"`
+	Limit    *int               `json:"limit,omitempty"`
+	Offset   *int               `json:"offset,omitempty"`
 	Filter   []store.FilterCond `json:"filter,omitempty"`
-	Sort     []store.SortKey  `json:"sort,omitempty"`
-	GroupBy  *string          `json:"group_by,omitempty"`
+	Sort     []store.SortKey    `json:"sort,omitempty"`
+	GroupBy  *string            `json:"group_by,omitempty"`
 }
 
 // updateInput 必须自定义解码：store.TaskPatch 有自己的 UnmarshalJSON，
@@ -62,6 +63,8 @@ type idInput struct {
 
 // taskOut 是任务对象出参；时间与可空字段统一为 string|null。
 // Values 是自定义字段值（协议形状原样透传）；无值时空对象（非 null）。
+// Images 是图片附件元数据（2026-11-26）；无图时空数组（非 null）。
+// Files 是文件附件元数据（2026-11-26）；无文件时空数组（非 null）。
 type taskOut struct {
 	ID          string                     `json:"id"`
 	Title       string                     `json:"title"`
@@ -69,10 +72,35 @@ type taskOut struct {
 	Priority    int                        `json:"priority"`
 	DueAt       *string                    `json:"due_at"`
 	Status      int                        `json:"status"`
+	ArchivedAt  *string                    `json:"archived_at"`
 	CompletedAt *string                    `json:"completed_at"`
 	CreatedAt   string                     `json:"created_at"`
 	UpdatedAt   string                     `json:"updated_at"`
 	Values      map[string]json.RawMessage `json:"values"`
+	Images      []imageOut                 `json:"images"`
+	Files       []fileOut                  `json:"files"`
+}
+
+// imageOut 是 taskOut.images 的一项；文件本体在数据库目录 images/<任务id>/ 下，
+// 出参不暴露磁盘路径（对本机 agent 无意义，读文件经 GUI 或按 id 运维）。
+type imageOut struct {
+	ID        string `json:"id"`
+	FileName  string `json:"file_name"`
+	Mime      string `json:"mime"`
+	Size      int64  `json:"size"`
+	CreatedAt string `json:"created_at"`
+}
+
+// fileOut 是 taskOut.files 的一项。copy 模式文件本体在数据库目录
+// files/<任务id>/ 下；ref 模式 Kind="ref"、SrcPath 为源文件绝对路径（引用），
+// 不暴露 StoredName（指应用数据目录内部文件名，跨进程无意义）。
+type fileOut struct {
+	ID        string `json:"id"`
+	FileName  string `json:"file_name"`
+	Kind      string `json:"kind"` // copy=已拷贝，ref=引用地址
+	SrcPath   string `json:"src_path,omitempty"`
+	Size      int64  `json:"size"`
+	CreatedAt string `json:"created_at"`
 }
 
 // listOut 对应 list_tasks 出参；total 是当前筛选条件下的总数。
@@ -106,11 +134,44 @@ func newTaskOut(task *store.Task) taskOut {
 		Priority:    task.Priority,
 		DueAt:       millisToRFC3339(task.DueAt),
 		Status:      task.Status,
+		ArchivedAt:  millisToRFC3339(task.ArchivedAt),
 		CompletedAt: millisToRFC3339(task.CompletedAt),
 		CreatedAt:   formatMillis(task.CreatedAt),
 		UpdatedAt:   formatMillis(task.UpdatedAt),
-		Values:      values,
+		Images:      newImageOuts(task.Images),
+		Files:       newFileOuts(task.Files),
 	}
+}
+
+// newImageOuts 把存储层图片元数据转为出参形状；无图时空数组（非 null）。
+func newImageOuts(images []store.TaskImage) []imageOut {
+	out := make([]imageOut, 0, len(images))
+	for _, img := range images {
+		out = append(out, imageOut{
+			ID:        img.ID,
+			FileName:  img.FileName,
+			Mime:      img.Mime,
+			Size:      img.Size,
+			CreatedAt: formatMillis(img.CreatedAt),
+		})
+	}
+	return out
+}
+
+// newFileOuts 把存储层文件元数据转为出参形状；无文件时空数组（非 null）。
+func newFileOuts(files []store.TaskFile) []fileOut {
+	out := make([]fileOut, 0, len(files))
+	for _, file := range files {
+		out = append(out, fileOut{
+			ID:        file.ID,
+			FileName:  file.FileName,
+			Kind:      string(file.Kind),
+			SrcPath:   file.SrcPath,
+			Size:      file.Size,
+			CreatedAt: formatMillis(file.CreatedAt),
+		})
+	}
+	return out
 }
 
 func newTaskOuts(tasks []*store.Task) []taskOut {
@@ -189,10 +250,12 @@ func newFieldOuts(fields []*store.Field) []fieldOut {
 // 不导出字段细节，这里声明协议侧副本，Type 用 store.FieldType 保证一致）。
 var builtinFieldMeta = []*store.Field{
 	{ID: "title", Name: "标题", Type: store.FieldTypeText, Display: store.DisplayPlain},
+	{ID: "description", Name: "备注", Type: store.FieldTypeText, Display: store.DisplayPlain},
 	{ID: "priority", Name: "优先级", Type: store.FieldTypeNumber, Display: store.DisplayPlain},
 	{ID: "due_at", Name: "到期时间", Type: store.FieldTypeDate, Display: store.DisplayPlain},
 	{ID: "status", Name: "状态", Type: store.FieldTypeNumber, Display: store.DisplayPlain},
-	{ID: "created_at", Name: "创建时间", Type: store.FieldTypeDate, Display: store.DisplayPlain},
+	{ID: "archived_at", Name: "归档时间", Type: store.FieldTypeDate, Display: store.DisplayPlain},
+	{ID: "completed_at", Name: "完成时间", Type: store.FieldTypeDate, Display: store.DisplayPlain},
 }
 
 func millisToRFC3339(millis *int64) *string {

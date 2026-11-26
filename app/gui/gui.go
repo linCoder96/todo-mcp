@@ -119,6 +119,12 @@ func Run() {
 					window.Hide()
 				}
 			},
+			// 页面没有处理的按键：单元格编辑态下 Esc 放弃修改
+			OnKey: viewModel.Key,
+			// Ctrl+V 往详情抽屉粘贴图片（聚焦的文本框自己消费剪贴板）
+			OnShortcut: viewModel.Shortcut,
+			// 系统拖文件：只有详情抽屉的虚线框认领（见 images.go dropZone）
+			OnFileDrop: viewModel.FileDrop,
 		}
 		created, err := ui.OpenWindow(application, config, ui.PageConfig{View: viewModel.page, Theme: &viewModel.theme})
 		if err != nil {
@@ -135,6 +141,15 @@ func Run() {
 		// 到期提醒（2026-11-25 ⑤）：后台定时检查，通知经 application.Post
 		// 回事件循环线程发送（SendNotification 需在宿主线程）。
 		go viewModel.remindLoop(application)
+
+		// 外部写入同步（2026-11-25）：MCP 进程写库后，重查经 application.Post
+		// 回事件循环线程执行（model 只属于窗口线程）。
+		go viewModel.watchExternalWrites(syncInterval, nil, func() {
+			application.Post(func() {
+				viewModel.refreshAfterExternalWrite()
+				invalidator.Invalidate()
+			})
+		})
 
 		// 托盘：左键切换显示/隐藏，右键原生菜单三项（design.md §5 第 7 项）
 		_, err = application.AddStatusItem(app.StatusItemConfig{

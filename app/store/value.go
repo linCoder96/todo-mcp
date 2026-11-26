@@ -220,7 +220,7 @@ func (r *TaskRepo) loadValuesFor(tx queryer, tasks []*Task) error {
 	rows, err := tx.Query(
 		`SELECT v.task_id, f.name, v.text_value, v.num_value, f.type
 		   FROM task_field_values v JOIN fields f ON f.id = v.field_id
-		  WHERE v.task_id IN (` + placeholders + `)`,
+		  WHERE v.task_id IN (`+placeholders+`)`,
 		ids...,
 	)
 	if err != nil {
@@ -372,10 +372,22 @@ func valueGroupKey(task *Task, field *Field) (string, string) {
 			}
 		case "due_at":
 			if task.DueAt != nil {
-				return msToRFC3339(*task.DueAt), time.UnixMilli(*task.DueAt).In(time.Local).Format("2006-01-02")
+				key := time.UnixMilli(*task.DueAt).In(time.Local).Format("2006-01-02")
+				return key, key
 			}
 		case "created_at":
-			return msToRFC3339(task.CreatedAt), time.UnixMilli(task.CreatedAt).In(time.Local).Format("2006-01-02")
+			key := time.UnixMilli(task.CreatedAt).In(time.Local).Format("2006-01-02")
+			return key, key
+		case "archived_at":
+			if task.ArchivedAt != nil {
+				key := time.UnixMilli(*task.ArchivedAt).In(time.Local).Format("2006-01-02")
+				return key, key
+			}
+		case "completed_at":
+			if task.CompletedAt != nil {
+				key := time.UnixMilli(*task.CompletedAt).In(time.Local).Format("2006-01-02")
+				return key, key
+			}
 		}
 		return "", "未设置"
 	}

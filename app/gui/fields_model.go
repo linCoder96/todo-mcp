@@ -96,6 +96,7 @@ func (m *model) buildQuery() store.ListQuery {
 	base := m.filter() // 沿用 Tab 的状态筛选（保留旧行为）
 	query.Status = base.Status
 	query.Priority = base.Priority
+	query.Archived = base.Archived
 
 	// 多条件筛选（AND；协议上限 10 条，超限截断，2026-11-25 ②）
 	if len(m.filterConds) > 0 {
@@ -277,9 +278,11 @@ func fieldFilterValue(op store.FilterOp, text string) string {
 	return string(encoded)
 }
 
-// applyQueryChange 在工具栏变更筛选/排序/分组后重查。
+// applyQueryChange 在工具栏变更筛选/排序/分组后重查，并把变更持久化到
+// app_prefs（重启后恢复，任务「筛选排序分组没有记住偏好」）。
 func (m *model) applyQueryChange() {
 	m.errorText = ""
+	m.saveViewPrefs()
 	if err := m.refresh(); err != nil {
 		m.errorText = err.Error()
 	}

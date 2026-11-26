@@ -40,4 +40,5 @@ func (m *model) priorityBadge(c ui.C, priority int) ui.Box {
 // setRowMeta 缓存主题供行内声明使用（page 每次重绘入口调用）。
 func (m *model) setRowMeta(c ui.C) {
 	m.pageTheme = c.Theme()
+	m.pageBounds = c.Bounds()
 }

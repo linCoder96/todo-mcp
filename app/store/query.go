@@ -41,13 +41,16 @@ type SortKey struct {
 }
 
 // ListQuery 是增强查询入参。
+// Archived 三态（2026-11-26 归档）：nil = 未归档（默认，常规视图不含归档任务）；
+// &false = 只要未归档；&true = 只要已归档。
 type ListQuery struct {
-	Status   *int        // 原有筛选（保留）
-	Priority *int        // 原有筛选（保留）
+	Status   *int         // 原有筛选（保留）
+	Priority *int         // 原有筛选（保留）
+	Archived *bool        // 归档筛选（2026-11-26）
 	Filters  []FilterCond // AND 语义
-	Sort     []SortKey   // 空 = 默认固定排序
-	GroupBy  string      // 分组字段；空 = 平铺
-	Limit    int         // 钳制 [1,200]；分组模式忽略（上限 1000）
+	Sort     []SortKey    // 空 = 默认固定排序
+	GroupBy  string       // 分组字段；空 = 平铺
+	Limit    int          // 钳制 [1,200]；分组模式忽略（上限 1000）
 	Offset   int
 }
 
@@ -63,6 +66,8 @@ func builtinColumn(fieldID string) (column string, kind FieldType) {
 	switch fieldID {
 	case "title":
 		return "title", FieldTypeText
+	case "description":
+		return "description", FieldTypeText
 	case "priority":
 		return "priority", FieldTypeNumber
 	case "due_at":
@@ -71,6 +76,10 @@ func builtinColumn(fieldID string) (column string, kind FieldType) {
 		return "status", FieldTypeNumber
 	case "created_at":
 		return "created_at", FieldTypeDate
+	case "archived_at":
+		return "archived_at", FieldTypeDate
+	case "completed_at":
+		return "completed_at", FieldTypeDate
 	}
 	return "", ""
 }
@@ -178,7 +187,7 @@ func parseFilterValue(field *Field, op FilterOp, raw json.RawMessage) (any, stri
 	if field.Type == FieldTypeText || field.Type == FieldTypeSingleSelect || field.Type == FieldTypeMultiSelect {
 		var text string
 		if err := json.Unmarshal(raw, &text); err != nil {
-			return nil, "", fmt.Errorf("值必须是字符串", )
+			return nil, "", fmt.Errorf("值必须是字符串")
 		}
 		return text, "text", nil
 	}
@@ -204,8 +213,14 @@ func parseFilterValue(field *Field, op FilterOp, raw json.RawMessage) (any, stri
 // buildFilterClauses 组装全部 WHERE 片段与参数。
 // 内置字段用 tasks 列；自定义字段用 EXISTS 子查询。返回条件切片与参数。
 func (r *TaskRepo) buildFilterClauses(q ListQuery, custom map[string]*Field) ([]string, []any, error) {
-	conditions := make([]string, 0, len(q.Filters)+2)
-	args := make([]any, 0, len(q.Filters)*2+2)
+	conditions := make([]string, 0, len(q.Filters)+3)
+	args := make([]any, 0, len(q.Filters)*2+3)
+	// 归档默认口径（2026-11-26）：nil / false = 只要未归档；true = 只要已归档。
+	if q.Archived == nil || !*q.Archived {
+		conditions = append(conditions, "archived_at IS NULL")
+	} else {
+		conditions = append(conditions, "archived_at IS NOT NULL")
+	}
 	if q.Status != nil {
 		conditions = append(conditions, "status = ?")
 		args = append(args, *q.Status)
@@ -432,7 +447,7 @@ func (r *TaskRepo) queryPaged(q ListQuery, where string, args []any, total int) 
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	if err := r.loadValuesFor(r.db, tasks); err != nil {
+	if err := r.loadDetailsFor(r.db, tasks); err != nil {
 		return nil, err
 	}
 	return &ListResult{Total: total, Tasks: tasks}, nil
@@ -465,7 +480,7 @@ func (r *TaskRepo) queryGrouped(q ListQuery, custom map[string]*Field, where str
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	if err := r.loadValuesFor(r.db, tasks); err != nil {
+	if err := r.loadDetailsFor(r.db, tasks); err != nil {
 		return nil, err
 	}
 	// 分组字段可能是内置字段名（不在 custom map 中），构造对应 Field。

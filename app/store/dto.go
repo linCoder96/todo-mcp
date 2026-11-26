@@ -20,6 +20,7 @@ type Task struct {
 	Priority    int // 0=无 1=低 2=中 3=高
 	DueAt       *int64
 	Status      int // 0=进行中 1=已完成
+	ArchivedAt  *int64
 	CompletedAt *int64
 	CreatedAt   int64
 	UpdatedAt   int64
@@ -27,8 +28,16 @@ type Task struct {
 	// text/single_select → string；multi_select → JSON 数组；number → number；
 	// date → RFC3339 字符串。由 loadValuesFor 聚合填充；未加载时为 nil。
 	Values map[string]json.RawMessage
+	// Images 是任务的图片附件元数据（2026-11-26），由 loadImagesFor 聚合填充，
+	// 按显示顺序；无图/未加载时为 nil。文件本体在数据库目录 images/<id>/ 下。
+	Images []TaskImage
+	// Files 是任务的文件附件元数据（2026-11-26，见 file.go），由 loadFilesFor
+	// 聚合填充，按显示顺序；无文件/未加载时为 nil。copy 模式文件本体在数据库
+	// 目录 files/<id>/ 下；ref 模式只存 src_path 引用（源文件不拷贝）。
+	Files []TaskFile
+	// ArchivedAt 是归档时间（2026-11-26 归档功能）；NULL = 未归档。归档任务
+	// 已从常规列表隐去（query.go 的 Archived 筛选），知识文档按它降序汇总。
 }
-
 
 // TaskPatch 部分更新的双层 Option（design-viva.md §5.2 第 3 项）：
 //
@@ -40,10 +49,10 @@ type Task struct {
 // 无法与"字段缺席"区分（M2 测试实测确认）。故这里实现自定义 UnmarshalJSON，
 // 按 key 存在性区分三态；运行时字段仍保持 **T 形态。
 type TaskPatch struct {
-	Title       **string                    `json:"title,omitempty"`
-	Description **string                    `json:"description,omitempty"`
-	Priority    **int                       `json:"priority,omitempty"`
-	DueAt       **string                    `json:"due_at,omitempty"`
+	Title       **string `json:"title,omitempty"`
+	Description **string `json:"description,omitempty"`
+	Priority    **int    `json:"priority,omitempty"`
+	DueAt       **string `json:"due_at,omitempty"`
 	// Values 是自定义字段值补丁（键=字段 id）：
 	//   整个 values 缺席 → 全部自定义值不动；值为 null 的键 → 清空该字段；有值 → 设置。
 	Values **map[string]json.RawMessage `json:"values,omitempty"`
@@ -118,9 +127,12 @@ func (patch *TaskPatch) UnmarshalJSON(data []byte) error {
 }
 
 // TaskFilter 是 List 的筛选条件；nil 字段表示不过滤。
+// Archived 三态（2026-11-26 归档）：nil = 未归档（默认口径，常规视图不含
+// 归档任务）；&false = 只要未归档；&true = 只要已归档。
 type TaskFilter struct {
 	Status   *int
 	Priority *int
+	Archived *bool
 }
 
 // msToRFC3339 把 UTC epoch 毫秒转为 RFC3339 UTC 字符串。

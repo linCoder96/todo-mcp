@@ -61,8 +61,8 @@ func TestOpenAtSetsPragmasAndMigrates(t *testing.T) {
 	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 2 {
-		t.Fatalf("user_version = %d，期望 2", version)
+	if version != latestVersion {
+		t.Fatalf("user_version = %d，期望 %d", version, latestVersion)
 	}
 	for _, object := range []struct {
 		kind string
@@ -77,6 +77,11 @@ func TestOpenAtSetsPragmasAndMigrates(t *testing.T) {
 		{"index", "idx_fields_position"},
 		{"index", "idx_tfv_field_text"},
 		{"index", "idx_tfv_field_num"},
+		{"table", "task_images"},
+		{"index", "idx_task_images_task"},
+		{"table", "task_files"},
+		{"index", "idx_task_files_task"},
+		{"table", "app_prefs"},
 	} {
 		var count int
 		err := db.QueryRow(
@@ -98,7 +103,7 @@ func TestOpenAtSetsPragmasAndMigrates(t *testing.T) {
 	}
 	defer reopened.Close()
 	var versionAgain int
-	if err := reopened.QueryRow("PRAGMA user_version").Scan(&versionAgain); err != nil || versionAgain != 2 {
+	if err := reopened.QueryRow("PRAGMA user_version").Scan(&versionAgain); err != nil || versionAgain != latestVersion {
 		t.Fatalf("重复打开后 user_version = %d err=%v", versionAgain, err)
 	}
 }
@@ -377,6 +382,107 @@ func TestListOrderPaginationFiltersAndClamp(t *testing.T) {
 	}
 }
 
+// completed_at 作为内置日期字段参与增强查询（任务时间概念完善需求）：
+// after/before 筛选、排序、分组与空值（未完成）归入「未设置」组。
+func TestQueryCompletedAtFilterSortGroup(t *testing.T) {
+	db, _ := newTestDB(t)
+	repo := NewTaskRepo(db)
+
+	doneA, err := repo.Create(input("已完成A"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	doneB, err := repo.Create(input("已完成B"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	openTask, err := repo.Create(input("进行中"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.Complete(doneA.ID); err != nil {
+		t.Fatal(err)
+	}
+	// doneB 与 doneA 都完成；同毫秒内两次 Complete 时间戳可能相等，
+	// 不做递增断言（依赖时钟精度），只要求落库非空。
+	done, err := repo.Complete(doneB.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 重新取已完成A 的落库快照（doneA 变量持有的是未完成时的旧对象）
+	snapA, err := repo.Get(doneA.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if done.CompletedAt == nil || snapA.CompletedAt == nil {
+		t.Fatalf("完成时间应落库: %v vs %v", done.CompletedAt, snapA.CompletedAt)
+	}
+
+	// after 筛选：完成时间晚于「完成时间 + 1 小时」的应为 0 条；
+	// before 同阈值应命中全部已完成任务（未完成为 NULL 不参与比较）。
+	futureText, _ := json.Marshal(msToRFC3339(*snapA.CompletedAt + 3600_000))
+	future := json.RawMessage(futureText)
+	after := []FilterCond{{Field: "completed_at", Op: OpAfter, Value: future}}
+	result, err := repo.Query(ListQuery{Filters: after, Limit: 50})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Tasks) != 0 {
+		t.Fatalf("completed_at after 筛选错误: %+v", result.Tasks)
+	}
+	before := []FilterCond{{Field: "completed_at", Op: OpBefore, Value: future}}
+	result, err = repo.Query(ListQuery{Filters: before, Limit: 50})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Tasks) != 2 {
+		t.Fatalf("completed_at before 筛选错误: %+v", result.Tasks)
+	}
+
+	// not_empty 筛选：只含已完成任务
+	notEmpty := []FilterCond{{Field: "completed_at", Op: OpNotEmpty}}
+	result, err = repo.Query(ListQuery{Filters: notEmpty, Limit: 50})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Tasks) != 2 {
+		t.Fatalf("completed_at not_empty 筛选错误: %+v", result.Tasks)
+	}
+
+	// 按 completed_at 升序：未完成（NULL）排后
+	result, err = repo.Query(ListQuery{Sort: []SortKey{{Field: "completed_at"}}, Limit: 50})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Tasks) != 3 ||
+		result.Tasks[0].ID != doneA.ID || result.Tasks[1].ID != doneB.ID || result.Tasks[2].ID != openTask.ID {
+		t.Fatalf("completed_at 排序错误: %+v", result.Tasks)
+	}
+
+	// 按 completed_at 分组：同日完成归入同一日期组，未完成归入「未设置」组。
+	result, err = repo.Query(ListQuery{GroupBy: "completed_at", Limit: 50})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Groups) != 2 {
+		t.Fatalf("completed_at 分组数 = %d, want 2", len(result.Groups))
+	}
+	var unset *GroupKey
+	doneCount := 0
+	for i := range result.Groups {
+		if result.Groups[i].Label == "未设置" {
+			unset = &result.Groups[i]
+		} else {
+			doneCount += len(result.Groups[i].Tasks)
+		}
+	}
+	if unset == nil || len(unset.Tasks) != 1 || unset.Tasks[0].ID != openTask.ID {
+		t.Fatalf("未完成任务应归入未设置组: %+v", result.Groups)
+	}
+	if doneCount != 2 {
+		t.Fatalf("已完成分组任务数 = %d, want 2", doneCount)
+	}
+}
 func TestRFC3339Conversion(t *testing.T) {
 	const text = "2026-11-25T01:00:00Z"
 	millis, err := rfc3339ToMs(text)

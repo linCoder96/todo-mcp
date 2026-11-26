@@ -6,7 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -23,6 +26,14 @@ func notFound(id string) error {
 // GUI 与 MCP 两个进程各自持有一个 TaskRepo，共享同一份方法与语义。
 type TaskRepo struct {
 	db *sql.DB
+	// 图片目录推导结果（images/<task_id>/，见 image.go）的缓存与错误。
+	imagesOnce    sync.Once
+	imagesDirPath string
+	imagesErr     error
+	// 文件目录推导结果（files/<task_id>/，见 file.go）的缓存与错误。
+	filesOnce    sync.Once
+	filesDirPath string
+	filesErr     error
 }
 
 func NewTaskRepo(db *sql.DB) *TaskRepo {
@@ -39,7 +50,7 @@ type TaskInput struct {
 	Values map[string]json.RawMessage
 }
 
-const taskColumns = `id, title, description, priority, due_at, status, completed_at, created_at, updated_at`
+const taskColumns = `id, title, description, priority, due_at, status, archived_at, completed_at, created_at, updated_at`
 
 // scanner 同时适配 *sql.Row 与 *sql.Rows。
 type scanner interface {
@@ -47,14 +58,14 @@ type scanner interface {
 }
 
 // scanTask 把一行扫描为 Task；可空列用 sql.Null* 承接 NULL。
-// 注意：不加载自定义字段值（调用方经 loadValuesFor 补齐）。
+// 注意：不加载自定义字段值与图片（调用方经 loadDetailsFor 补齐）。
 func scanTask(row scanner) (*Task, error) {
 	task := &Task{}
 	var description sql.NullString
-	var dueAt, completedAt sql.NullInt64
+	var dueAt, archivedAt, completedAt sql.NullInt64
 	err := row.Scan(
 		&task.ID, &task.Title, &description, &task.Priority, &dueAt,
-		&task.Status, &completedAt, &task.CreatedAt, &task.UpdatedAt,
+		&task.Status, &archivedAt, &completedAt, &task.CreatedAt, &task.UpdatedAt,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -68,12 +79,14 @@ func scanTask(row scanner) (*Task, error) {
 	if dueAt.Valid {
 		task.DueAt = &dueAt.Int64
 	}
+	if archivedAt.Valid {
+		task.ArchivedAt = &archivedAt.Int64
+	}
 	if completedAt.Valid {
 		task.CompletedAt = &completedAt.Int64
 	}
 	return task, nil
 }
-
 
 func validateTitle(title string) error {
 	if strings.TrimSpace(title) == "" {
@@ -144,16 +157,17 @@ func (r *TaskRepo) Get(id string) (*Task, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := r.loadValuesFor(r.db, []*Task{task}); err != nil {
+	if err := r.loadDetailsFor(r.db, []*Task{task}); err != nil {
 		return nil, err
 	}
 	return task, nil
 }
 
 // listQuery 组装筛选 WHERE 与参数，保持 status/priority 索引可用。
+// Archived 三态见 TaskFilter 注释；nil 按未归档处理（归档任务从常规列表隐去）。
 func listQuery(filter TaskFilter) (string, []any) {
-	conditions := make([]string, 0, 2)
-	args := make([]any, 0, 2)
+	conditions := make([]string, 0, 3)
+	args := make([]any, 0, 3)
 	if filter.Status != nil {
 		conditions = append(conditions, "status = ?")
 		args = append(args, *filter.Status)
@@ -161,6 +175,11 @@ func listQuery(filter TaskFilter) (string, []any) {
 	if filter.Priority != nil {
 		conditions = append(conditions, "priority = ?")
 		args = append(args, *filter.Priority)
+	}
+	if filter.Archived == nil || !*filter.Archived {
+		conditions = append(conditions, "archived_at IS NULL")
+	} else {
+		conditions = append(conditions, "archived_at IS NOT NULL")
 	}
 	if len(conditions) == 0 {
 		return "", args
@@ -205,7 +224,7 @@ func (r *TaskRepo) List(filter TaskFilter, limit, offset int) ([]*Task, error) {
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	if err := r.loadValuesFor(r.db, tasks); err != nil {
+	if err := r.loadDetailsFor(r.db, tasks); err != nil {
 		return nil, err
 	}
 	return tasks, nil
@@ -219,6 +238,18 @@ func (r *TaskRepo) Count(filter TaskFilter) (int, error) {
 		return 0, err
 	}
 	return total, nil
+}
+
+// DataVersion 返回 SQLite 的 PRAGMA data_version：同一连接上先后读到的两个值
+// 不同，说明期间有**其它连接**提交过（本连接自己的提交不会改变它）。
+// GUI 进程用它探测 MCP 进程对共享数据库文件的写入（任务、字段、字段值都算）。
+// 连接被连接池回收重建后数值可能跳变，后果只是一次多余的重查。
+func (r *TaskRepo) DataVersion() (int64, error) {
+	var version int64
+	if err := r.db.QueryRow(`PRAGMA data_version`).Scan(&version); err != nil {
+		return 0, err
+	}
+	return version, nil
 }
 
 // Update 部分更新：patch 三态由 **T 表达；description/due_at 显式 null 清空。
@@ -315,7 +346,7 @@ func (r *TaskRepo) Update(id string, patch TaskPatch) (*Task, error) {
 		if err := tx.Rollback(); err != nil {
 			return nil, err
 		}
-		if err := r.loadValuesFor(r.db, []*Task{task}); err != nil {
+		if err := r.loadDetailsFor(r.db, []*Task{task}); err != nil {
 			return nil, err
 		}
 		return task, nil
@@ -332,7 +363,7 @@ func (r *TaskRepo) Update(id string, patch TaskPatch) (*Task, error) {
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
-	if err := r.loadValuesFor(r.db, []*Task{task}); err != nil {
+	if err := r.loadDetailsFor(r.db, []*Task{task}); err != nil {
 		return nil, err
 	}
 	return task, nil
@@ -358,7 +389,7 @@ func (r *TaskRepo) Complete(id string) (*Task, error) {
 		if err := tx.Commit(); err != nil {
 			return nil, err
 		}
-		if err := r.loadValuesFor(r.db, []*Task{task}); err != nil {
+		if err := r.loadDetailsFor(r.db, []*Task{task}); err != nil {
 			return nil, err
 		}
 		return task, nil
@@ -377,7 +408,7 @@ func (r *TaskRepo) Complete(id string) (*Task, error) {
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
-	if err := r.loadValuesFor(r.db, []*Task{task}); err != nil {
+	if err := r.loadDetailsFor(r.db, []*Task{task}); err != nil {
 		return nil, err
 	}
 	return task, nil
@@ -385,6 +416,7 @@ func (r *TaskRepo) Complete(id string) (*Task, error) {
 
 // Reopen 撤销完成（design-viva.md §7.1：GUI 取消勾选独有行为）：
 // status=0 + completed_at 置空；对进行中任务同样幂等。
+// 已归档任务一并退出归档（维持「归档必已完成」不变式）：archived_at 置空。
 func (r *TaskRepo) Reopen(id string) (*Task, error) {
 	tx, err := r.db.BeginTx(context.Background(), nil)
 	if err != nil {
@@ -399,11 +431,11 @@ func (r *TaskRepo) Reopen(id string) (*Task, error) {
 	if err != nil {
 		return nil, err
 	}
-	if task.Status == 0 {
+	if task.Status == 0 && task.ArchivedAt == nil {
 		if err := tx.Commit(); err != nil {
 			return nil, err
 		}
-		if err := r.loadValuesFor(r.db, []*Task{task}); err != nil {
+		if err := r.loadDetailsFor(r.db, []*Task{task}); err != nil {
 			return nil, err
 		}
 		return task, nil
@@ -411,18 +443,19 @@ func (r *TaskRepo) Reopen(id string) (*Task, error) {
 
 	now := time.Now().UnixMilli()
 	if _, err := tx.Exec(
-		`UPDATE tasks SET status = 0, completed_at = NULL, updated_at = ? WHERE id = ?`,
+		`UPDATE tasks SET status = 0, completed_at = NULL, archived_at = NULL, updated_at = ? WHERE id = ?`,
 		now, id,
 	); err != nil {
 		return nil, fmt.Errorf("撤销完成失败: %w", err)
 	}
 	task.Status = 0
 	task.CompletedAt = nil
+	task.ArchivedAt = nil
 	task.UpdatedAt = now
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
-	if err := r.loadValuesFor(r.db, []*Task{task}); err != nil {
+	if err := r.loadDetailsFor(r.db, []*Task{task}); err != nil {
 		return nil, err
 	}
 	return task, nil
@@ -443,17 +476,132 @@ func (r *TaskRepo) Remove(id string) (*Task, error) {
 	if err != nil {
 		return nil, err
 	}
-	// 删除前先聚合字段值，让快照完整（删除后值表已清空）。
-	if err := r.loadValuesFor(tx, []*Task{task}); err != nil {
+	// 删除前先聚合字段值与图片，让快照完整（删除后值表/图片表已清空）。
+	if err := r.loadDetailsFor(tx, []*Task{task}); err != nil {
+		return nil, err
+	}
+	storedFiles, err := r.removeTaskFileRows(tx, id)
+	if err != nil {
 		return nil, err
 	}
 	if err := r.deleteFieldValues(tx, id); err != nil {
+		return nil, err
+	}
+	storedImages, err := r.removeTaskImageRows(tx, id)
+	if err != nil {
 		return nil, err
 	}
 	if _, err := tx.Exec(`DELETE FROM tasks WHERE id = ?`, id); err != nil {
 		return nil, fmt.Errorf("删除任务失败: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	// 文件系统没有事务：行删净提交后再删图片文件；删不掉的留待人工清理，
+	// 不阻塞任务删除。
+	if dir, dirErr := r.filesDir(); dirErr == nil {
+		for _, stored := range storedFiles {
+			_ = os.Remove(filepath.Join(dir, id, stored))
+		}
+		_ = os.Remove(filepath.Join(dir, id)) // 空目录顺手带走
+	}
+	if dir, dirErr := r.imagesDir(); dirErr == nil {
+		for _, stored := range storedImages {
+			_ = os.Remove(filepath.Join(dir, id, stored))
+		}
+		_ = os.Remove(filepath.Join(dir, id)) // 空目录顺手带走
+	}
+	return task, nil
+}
+
+// Archive 归档任务（2026-11-26 归档功能）：archived_at 记当前时间；幂等——
+// 已归档任务重复调用直接返回当前对象，不重写时间戳。仅已完成任务可归档；
+// 归档任务从常规列表隐去（TaskFilter.Archived 默认口径）。归档是否成功
+// 与知识文档无关：调用方在归档成功后调用 GenerateArchiveDoc 重写文档。
+func (r *TaskRepo) Archive(id string) (*Task, error) {
+	tx, err := r.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	task, err := scanTask(tx.QueryRow(`SELECT `+taskColumns+` FROM tasks WHERE id = ?`, id))
+	if errors.Is(err, ErrNotFound) {
+		return nil, notFound(id)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if task.ArchivedAt != nil {
+		if err := tx.Commit(); err != nil {
+			return nil, err
+		}
+		if err := r.loadDetailsFor(r.db, []*Task{task}); err != nil {
+			return nil, err
+		}
+		return task, nil
+	}
+	if task.Status != 1 {
+		return nil, fmt.Errorf("只有已完成的任务才能归档")
+	}
+
+	now := time.Now().UnixMilli()
+	if _, err := tx.Exec(
+		`UPDATE tasks SET archived_at = ?, updated_at = ? WHERE id = ?`,
+		now, now, id,
+	); err != nil {
+		return nil, fmt.Errorf("归档任务失败: %w", err)
+	}
+	task.ArchivedAt = &now
+	task.UpdatedAt = now
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	if err := r.loadDetailsFor(r.db, []*Task{task}); err != nil {
+		return nil, err
+	}
+	return task, nil
+}
+
+// Unarchive 取消归档：archived_at 置空，任务回到「已完成」视图；对未归档
+// 任务幂等。不动 status/completed_at（任务保持已完成状态）。
+func (r *TaskRepo) Unarchive(id string) (*Task, error) {
+	tx, err := r.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	task, err := scanTask(tx.QueryRow(`SELECT `+taskColumns+` FROM tasks WHERE id = ?`, id))
+	if errors.Is(err, ErrNotFound) {
+		return nil, notFound(id)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if task.ArchivedAt == nil {
+		if err := tx.Commit(); err != nil {
+			return nil, err
+		}
+		if err := r.loadDetailsFor(r.db, []*Task{task}); err != nil {
+			return nil, err
+		}
+		return task, nil
+	}
+
+	now := time.Now().UnixMilli()
+	if _, err := tx.Exec(
+		`UPDATE tasks SET archived_at = NULL, updated_at = ? WHERE id = ?`,
+		now, id,
+	); err != nil {
+		return nil, fmt.Errorf("取消归档失败: %w", err)
+	}
+	task.ArchivedAt = nil
+	task.UpdatedAt = now
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	if err := r.loadDetailsFor(r.db, []*Task{task}); err != nil {
 		return nil, err
 	}
 	return task, nil

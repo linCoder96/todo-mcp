@@ -1,4 +1,4 @@
-// Package mcp 的五工具注册与 handler。
+// Package mcp 的工具注册与 handler。
 //
 // 这里只用 SDK 的低层 server.AddTool：go-sdk v1.8.0 的泛型 AddTool 会把
 // input schema 校验失败打包成 CallToolResult{IsError:true}（mcp/server.go
@@ -21,7 +21,8 @@ import (
 	"todo-mcp/app/store"
 )
 
-// 五工具的 input schema，逐字对齐 design.md §4.1~§4.5。
+// 工具的 input schema（前五个逐字对齐 design.md §4.1~§4.5；archive/unarchive
+// 为 2026-11-26 归档功能新增，与 idSchema 同构）。
 const createTaskSchema = `{
   "type": "object",
   "properties": {
@@ -39,13 +40,13 @@ const listTasksSchema = `{
   "type": "object",
   "properties": {
     "status":   { "type": "integer", "enum": [0, 1], "description": "筛选状态：0=进行中 1=已完成（缺省=不过滤）" },
-    "priority": { "type": "integer", "enum": [0, 1, 2, 3], "description": "筛选优先级（缺省=不过滤）" },
+    "archived": { "type": "boolean", "description": "归档筛选（2026-11-26 归档功能）：true=只看已归档；缺省/false=只看未归档（归档任务默认不出现在列表里）" },
     "limit":    { "type": "integer", "minimum": 1, "maximum": 200, "default": 50, "description": "分页大小，上限 200" },
     "offset":   { "type": "integer", "minimum": 0, "default": 0, "description": "分页偏移" },
     "filter":   { "type": "array", "maxItems": 10, "items": {
                    "type": "object",
                    "properties": {
-                     "field": { "type": "string", "description": "字段：内置名（title/priority/due_at/status/created_at）或自定义字段 id" },
+                     "field": { "type": "string", "description": "字段：内置名（title/description/priority/due_at/status/created_at/completed_at）或自定义字段 id" },
                      "op":    { "type": "string", "enum": ["eq", "contains", "gt", "lt", "is", "has", "before", "after", "empty", "not_empty"], "description": "操作符，按字段类型限制（见 list_fields）" },
                      "value": { "description": "比较值：文本/选项=string，数字=number，日期=RFC3339；empty/not_empty 省略" }
                    },
@@ -199,7 +200,8 @@ func businessError(action string, err error) error {
 	return fmt.Errorf("%s: %w", action, err)
 }
 
-// registerTools 按 design.md §4 的顺序注册恰好五个工具。
+// registerTools 注册全部工具：design.md §4 的五个 + 2026-11-26 归档两个
+// （archive_task / unarchive_task），其后是字段/文件/图片工具。
 func registerTools(server *mcp.Server, repo *store.TaskRepo) {
 	addTypedTool(server, "create_task", "创建一条待办任务", createTaskSchema, createTaskSchema,
 		func(in createInput) error {
@@ -307,6 +309,38 @@ func registerTools(server *mcp.Server, repo *store.TaskRepo) {
 			return newTaskOut(task), nil
 		})
 
+	addTypedTool(server, "archive_task",
+		"归档一条已完成的任务（归档后从常规列表隐去，进入已归档视图；幂等，重复调用不重写时间戳）",
+		idSchema,
+		idSchema,
+		nil,
+		func(_ context.Context, in idInput) (taskOut, error) {
+			task, err := repo.Archive(in.ID)
+			if err != nil {
+				return taskOut{}, businessError("归档任务失败", err)
+			}
+			if _, err := repo.GenerateArchiveDoc(); err != nil {
+				return taskOut{}, businessError("生成归档知识文档失败", err)
+			}
+			return newTaskOut(task), nil
+		})
+
+	addTypedTool(server, "unarchive_task",
+		"取消归档：任务回到已完成列表（幂等）",
+		idSchema,
+		idSchema,
+		nil,
+		func(_ context.Context, in idInput) (taskOut, error) {
+			task, err := repo.Unarchive(in.ID)
+			if err != nil {
+				return taskOut{}, businessError("取消归档失败", err)
+			}
+			if _, err := repo.GenerateArchiveDoc(); err != nil {
+				return taskOut{}, businessError("生成归档知识文档失败", err)
+			}
+			return newTaskOut(task), nil
+		})
+
 	addTypedTool(server, "remove_task", "删除任务（物理删除，不可恢复）",
 		idSchema,
 		idSchema,
@@ -320,7 +354,7 @@ func registerTools(server *mcp.Server, repo *store.TaskRepo) {
 		},
 	)
 
-
-
 	registerFieldTools(server, repo)
+	registerFileTools(server, repo)
+	registerImageTools(server, repo)
 }

@@ -18,6 +18,24 @@ func waitRefresh(t *testing.T, driver *app.Driver) {
 	}
 }
 
+// clickMenu 按可访问名点击菜单项：菜单绘制在最上层，同名按钮（任务行「删除」）
+// 若先用通用 click 命中，会点到页面上的按钮；这里从后往前找覆盖层里的项。
+func clickMenu(t *testing.T, driver *app.Driver, name string) {
+	t.Helper()
+	hits := driver.Snapshot().Hits
+	for i := len(hits) - 1; i >= 0; i-- {
+		if hits[i].Label != name {
+			continue
+		}
+		bounds := hits[i].Bounds
+		if err := driver.Click(bounds.X+bounds.Width/2, bounds.Y+bounds.Height/2); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	t.Fatalf("找不到菜单项 %q（hits: %v）", name, hitLabels(driver))
+}
+
 // TestFieldModalCreateAndValueDisplay：新建字段 + 任务值行内显示。
 func TestFieldModalCreateAndValueDisplay(t *testing.T) {
 	m, repo := newTestModel(t)
@@ -44,8 +62,9 @@ func TestFieldModalCreateAndValueDisplay(t *testing.T) {
 		t.Fatalf("字段值未显示: %v", labelValues(driver))
 	}
 
-	// 打开字段弹窗，应显示类型网格
-	click(t, driver, "字段")
+	// 打开列设置面板 →「新增字段」打开字段弹窗，应显示类型网格
+	click(t, driver, "列设置")
+	click(t, driver, "新增字段")
 	if !shows(driver, "选择字段类型") {
 		t.Fatalf("字段弹窗未打开: %v", labelValues(driver))
 	}
@@ -179,8 +198,8 @@ func TestInlineEditCustomFieldValue(t *testing.T) {
 		t.Fatal("beginEdit 未初始化字段值缓冲")
 	}
 	// 填数字与单选，保存
-	m.editValues["评分"] = "92.5"
-	m.editValues["分类"] = "工作"
+	*m.editValues["评分"] = "92.5"
+	*m.editValues["分类"] = "工作"
 	m.saveEdit(task.ID)
 	if m.errorText != "" {
 		t.Fatalf("保存报错: %s", m.errorText)
@@ -201,7 +220,7 @@ func TestInlineEditCustomFieldValue(t *testing.T) {
 
 	// 非法数字应整体拒绝且不清空已有值
 	m.beginEdit(m.tasks[0].Task)
-	m.editValues["评分"] = "abc"
+	*m.editValues["评分"] = "abc"
 	m.saveEdit(task.ID)
 	if m.errorText == "" {
 		t.Fatal("非法数字应报错")
@@ -215,7 +234,7 @@ func TestInlineEditCustomFieldValue(t *testing.T) {
 	}
 }
 
-// TestFieldColumnDelete：列设置面板删除自定义字段列（二次确认）→ 字段及其值级联删除。
+// TestFieldColumnDelete：列设置面板字段「…」菜单删除自定义字段列（二次确认）→ 字段及其值级联删除。
 func TestFieldColumnDelete(t *testing.T) {
 	m, repo := newTestModel(t)
 	field, err := repo.CreateField(store.FieldInput{
@@ -238,23 +257,32 @@ func TestFieldColumnDelete(t *testing.T) {
 	}
 	driver := open(t, m)
 
-	// 打开列设置面板：≥1 个字段时「字段列序」区应显示（删除按钮在此）
+	// 打开列设置面板：自定义字段行应有「…」菜单
 	click(t, driver, "列设置")
-	if !shows(driver, "字段列序") {
-		t.Fatalf("字段列序区未显示（≥1 字段应始终显示）: %v", labelValues(driver))
+	if !shows(driver, "显示列") {
+		t.Fatalf("列设置面板未打开: %v", labelValues(driver))
+	}
+	click(t, driver, "…")
+	if !shows(driver, "修改字段") {
+		t.Fatalf("字段「…」菜单未打开: %v", labelValues(driver))
 	}
 
-	// 第一次点击删除：仅进入确认态，不删除
-	click(t, driver, "删除 分类")
+	// 第一次点击删除：仅进入确认态，不删除（选中即收起菜单）
+	clickMenu(t, driver, "删除")
 	if len(m.fields) != 1 {
 		t.Fatalf("第一次点击不应删除字段: %+v", m.fields)
 	}
-	if !shows(driver, "确认删除？") {
-		t.Fatalf("第一次点击应出现二次确认: %v", labelValues(driver))
+	if m.confirmFieldID != field.ID {
+		t.Fatalf("第一次点击应进入二次确认态: confirmFieldID=%q want %q", m.confirmFieldID, field.ID)
 	}
 
+	// 重新打开菜单：删除项应变为「确认删除？」
+	click(t, driver, "…")
+	if !shows(driver, "确认删除？") {
+		t.Fatalf("确认态下菜单应显示「确认删除？」: %v", labelValues(driver))
+	}
 	// 第二次点击：真正删除，级联删值
-	click(t, driver, "确认删除？")
+	clickMenu(t, driver, "确认删除？")
 	waitRefresh(t, driver)
 	if len(m.fields) != 0 {
 		t.Fatalf("第二次点击应删除字段: %+v", m.fields)
@@ -269,6 +297,71 @@ func TestFieldColumnDelete(t *testing.T) {
 	}
 	if _, ok := reloaded.Values["分类"]; ok {
 		t.Fatalf("字段删除后其值应级联清空: %v", reloaded.Values)
+	}
+	assertLayoutClean(t, driver)
+}
+
+// TestFieldMenuEdit：列设置面板「…」菜单 → 修改字段 → 打开既有字段编辑弹窗（编辑态）。
+func TestFieldMenuEdit(t *testing.T) {
+	m, repo := newTestModel(t)
+	field, err := repo.CreateField(store.FieldInput{
+		Name: "分类", Type: store.FieldTypeSingleSelect, Options: []string{"A", "B"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.refresh(); err != nil {
+		t.Fatal(err)
+	}
+	driver := open(t, m)
+
+	click(t, driver, "列设置")
+	if !shows(driver, "显示列") {
+		t.Fatalf("列设置面板未打开: %v", labelValues(driver))
+	}
+	click(t, driver, "…")
+	if !shows(driver, "修改字段") {
+		t.Fatalf("字段「…」菜单未打开: %v", labelValues(driver))
+	}
+
+	click(t, driver, "修改字段")
+	waitRefresh(t, driver)
+
+	// 弹窗应处于编辑态：打开、editID 指向该字段、回显字段名、底部为「保存字段」
+	if !m.fieldModalOpen || m.fieldEditID != field.ID {
+		t.Fatalf("修改字段应打开编辑弹窗: open=%v editID=%q want %q", m.fieldModalOpen, m.fieldEditID, field.ID)
+	}
+	if m.fieldName != field.Name {
+		t.Fatalf("编辑弹窗应回显字段名: %q", m.fieldName)
+	}
+	if !shows(driver, "保存字段") {
+		t.Fatalf("编辑态弹窗底部应为「保存字段」: %v", labelValues(driver))
+	}
+	assertLayoutClean(t, driver)
+}
+
+// TestFieldMenuAddField：列设置面板底部「新增字段」→ 打开字段创建弹窗（新建态）。
+func TestFieldMenuAddField(t *testing.T) {
+	m, _ := newTestModel(t)
+	if err := m.refresh(); err != nil {
+		t.Fatal(err)
+	}
+	driver := open(t, m)
+
+	click(t, driver, "列设置")
+	if !shows(driver, "新增字段") {
+		t.Fatalf("列设置面板底部应有「新增字段」入口: %v", labelValues(driver))
+	}
+
+	click(t, driver, "新增字段")
+	waitRefresh(t, driver)
+
+	// 弹窗应处于新建态：打开、editID 为空、底部为「创建字段」
+	if !m.fieldModalOpen || m.fieldEditID != "" {
+		t.Fatalf("新增字段应打开创建弹窗: open=%v editID=%q", m.fieldModalOpen, m.fieldEditID)
+	}
+	if !shows(driver, "创建字段") {
+		t.Fatalf("新建态弹窗底部应为「创建字段」: %v", labelValues(driver))
 	}
 	assertLayoutClean(t, driver)
 }

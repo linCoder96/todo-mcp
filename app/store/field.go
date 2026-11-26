@@ -65,10 +65,12 @@ func (f *Field) Choices() []string {
 // builtinFields 是 list_fields 返回的内置字段（不可删改、不可作为自定义值键）。
 var builtinFields = []Field{
 	{ID: "title", Name: "标题", Type: FieldTypeText, Display: DisplayPlain},
+	{ID: "description", Name: "备注", Type: FieldTypeText, Display: DisplayPlain},
 	{ID: "priority", Name: "优先级", Type: FieldTypeSingleSelect, Display: DisplayPlain},
 	{ID: "due_at", Name: "到期时间", Type: FieldTypeDate, Display: DisplayPlain},
 	{ID: "status", Name: "状态", Type: FieldTypeSingleSelect, Display: DisplayPlain},
-	{ID: "created_at", Name: "创建时间", Type: FieldTypeDate, Display: DisplayPlain},
+	{ID: "archived_at", Name: "归档时间", Type: FieldTypeDate, Display: DisplayPlain},
+	{ID: "completed_at", Name: "完成时间", Type: FieldTypeDate, Display: DisplayPlain},
 }
 
 // BuiltinFieldID 判断某字段键是否为内置字段（键值空间：内置名 + 自定义 UUID）。
@@ -93,10 +95,10 @@ type FieldInput struct {
 // FieldPatch 是 UpdateField 的可改字段（双层 Option 三态，与 TaskPatch 同构）。
 // 仅 name / display / options（选择类）/ position 可改；type 创建后不可变。
 type FieldPatch struct {
-	Name     **string     `json:"name,omitempty"`
+	Name     **string       `json:"name,omitempty"`
 	Display  **FieldDisplay `json:"display,omitempty"`
-	Options  **[]string   `json:"options,omitempty"` // 显式 null 对非选择类禁止
-	Position **int        `json:"position,omitempty"`
+	Options  **[]string     `json:"options,omitempty"` // 显式 null 对非选择类禁止
+	Position **int          `json:"position,omitempty"`
 }
 
 const fieldColumns = `id, name, type, display, options, position, created_at, updated_at`

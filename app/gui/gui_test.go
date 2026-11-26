@@ -15,7 +15,14 @@ import (
 // newTestModel 用 t.TempDir 的临时库建模型；不依赖真实 %APPDATA% 或窗口。
 func newTestModel(t *testing.T) (*model, *store.TaskRepo) {
 	t.Helper()
-	db, err := store.OpenAt(filepath.Join(t.TempDir(), "todo.db"))
+	return newTestModelAt(t, filepath.Join(t.TempDir(), "todo.db"))
+}
+
+// newTestModelAt 在指定路径的数据库上建模型。需要在同一文件上再开一个连接的
+// 测试用它（t.TempDir 每次调用都返回新目录，不能另调一次来拼同一个路径）。
+func newTestModelAt(t *testing.T, path string) (*model, *store.TaskRepo) {
+	t.Helper()
+	db, err := store.OpenAt(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -26,6 +33,14 @@ func newTestModel(t *testing.T) (*model, *store.TaskRepo) {
 
 // open 以真实绘制器/路由/焦点规则驱动页面，不打开窗口（官方 skill §5 第一层）。
 func open(t *testing.T, m *model) *app.Driver {
+	t.Helper()
+	driver, _ := openWithInvalidator(t, m)
+	return driver
+}
+
+// openWithInvalidator 同 open，并把 Invalidator 交给调用方：测试「窗口线程之外
+// 的重查 + 请求重绘」这类路径时需要它。
+func openWithInvalidator(t *testing.T, m *model) (*app.Driver, *app.Invalidator) {
 	t.Helper()
 	page := ui.NewPage(ui.PageConfig{View: m.page})
 	invalidator := &app.Invalidator{}
@@ -41,13 +56,18 @@ func open(t *testing.T, m *model) *app.Driver {
 			}
 			invalidator.Invalidate()
 		},
+		// 与 gui.go 一致：页面没处理的按键（单元格编辑态的 Esc）交给 model
+		OnKey: m.Key,
+		// 与 gui.go 一致：Ctrl+V 粘贴图片、拖放认领
+		OnShortcut: m.Shortcut,
+		OnFileDrop: m.FileDrop,
 	}
 	driver, err := app.NewDriver(ui.Configure(page, base), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(driver.Close)
-	return driver
+	return driver, invalidator
 }
 
 // click 按可访问名点击控件（不按像素）。
@@ -66,10 +86,12 @@ func click(t *testing.T, driver *app.Driver, name string) {
 }
 
 // clickCheckbox 点击复选框方框本身（命中区域左端），避免落在标签文字上。
+// 同名命中里列表行（RoleOption，可达名=任务标题）排在真正的复选框之前，
+// 2026-11-26 序号列加行选择复选框后必须按角色过滤，只认复选框。
 func clickCheckbox(t *testing.T, driver *app.Driver, label string) {
 	t.Helper()
 	for _, hit := range driver.Snapshot().Hits {
-		if hit.Label == label {
+		if hit.Label == label && hit.Role == gfx.RoleCheckbox {
 			bounds := hit.Bounds
 			if err := driver.Click(bounds.X+8, bounds.Y+bounds.Height/2); err != nil {
 				t.Fatal(err)
