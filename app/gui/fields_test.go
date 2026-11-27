@@ -3,6 +3,7 @@ package gui
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"todo-mcp/app/store"
@@ -362,6 +363,49 @@ func TestFieldMenuAddField(t *testing.T) {
 	}
 	if !shows(driver, "创建字段") {
 		t.Fatalf("新建态弹窗底部应为「创建字段」: %v", labelValues(driver))
+	}
+	assertLayoutClean(t, driver)
+}
+
+// TestFieldModalTypeSelect：字段类型改为下拉选择后，点开下拉选「单选」，
+// 选项输入框按类型出现；保存后字段按所选类型落库。
+func TestFieldModalTypeSelect(t *testing.T) {
+	m, repo := newTestModel(t)
+	if err := m.refresh(); err != nil {
+		t.Fatal(err)
+	}
+	driver := open(t, m)
+
+	click(t, driver, "列设置")
+	click(t, driver, "新增字段")
+	if !shows(driver, "选择字段类型") {
+		t.Fatalf("字段弹窗未打开: %v", labelValues(driver))
+	}
+	// 下拉触发器：折叠时只绘当前项「文本」，点它展开选项列表
+	click(t, driver, "选择字段类型")
+	click(t, driver, "单选")
+	waitRefresh(t, driver)
+	if got := m.fieldTypeSel.typeKey; got != store.FieldTypeSingleSelect {
+		t.Fatalf("下拉应选中单选类型，得到 %s", got)
+	}
+	if !shows(driver, "多个选项用逗号分隔") {
+		t.Fatalf("选单选后应出现选项输入框: %v", labelValues(driver))
+	}
+
+	typeInto(t, driver, "字段名称", "状态")
+	typeInto(t, driver, "选项", "待办, 完成")
+	click(t, driver, "创建字段")
+	waitRefresh(t, driver)
+
+	fields, err := repo.ListFields()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fields) != 1 || fields[0].Name != "状态" || fields[0].Type != store.FieldTypeSingleSelect {
+		t.Fatalf("字段未按单选类型落库: %+v", fields)
+	}
+	if got := strings.Join(fields[0].Choices(), ","); got != "待办,完成" {
+		t.Fatalf("选项未按逗号拆分落库: %q", got)
 	}
 	assertLayoutClean(t, driver)
 }

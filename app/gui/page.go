@@ -625,24 +625,19 @@ func (m *model) fieldTypeOf(name string) store.FieldType {
 	return store.FieldTypeText
 }
 
-// fieldModalBody 字段编辑弹窗主体：名称 + 类型网格 + 选项输入（参考图布局）。
+// fieldModalBody 字段编辑弹窗主体：名称 + 类型下拉 + 选项输入。
 func (m *model) fieldModalBody(c ui.C) {
+	theme := c.Theme()
 	ui.Column(c).FillWidth().Gap(8).Children(func() {
 		ui.TextField(c, &m.fieldName, "字段名称", "输入字段名称")
-		ui.Paragraph(c, "选择字段类型", 1).Muted()
-		ui.Grid(c, 180).FillWidth().Children(func() {
-			for index, choice := range fieldTypeGrid {
-				// 选中=实心主色，未选=描边；选中态由按钮本身表达，不再画对勾
-				if index == m.fieldTypeIndex {
-					if ui.Button(c, choice.label).Clicked() {
-						m.fieldTypeIndex = index
-					}
-				} else if ui.Button(c, choice.label).Outline().Clicked() {
-					m.fieldTypeIndex = index
-				}
-			}
+		ui.Row(c).Gap(8).Items(ui.Center).Children(func() {
+			ui.Text(c, "选择字段类型").FontSize(theme.Metrics.FontSizeS).Muted()
+			// 类型改为下拉选择（任务 01a21aa7）：8 个类型收敛为一个 Select，
+			// 选中态由触发器文案表达；单选/多选仍按选择追加选项输入框。
+			ui.Select(c, &m.fieldTypeSel, fieldTypeGridChoices(), fieldTypeGridLabel).
+				Width(160).Label("选择字段类型")
 		})
-		if isSelectType(fieldTypeGrid[m.fieldTypeIndex].typeKey) {
+		if isSelectType(m.fieldTypeSel.typeKey) {
 			ui.TextField(c, &m.fieldOptions, "选项", "多个选项用逗号分隔")
 		}
 	})

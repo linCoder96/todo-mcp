@@ -63,16 +63,23 @@ var fieldTypeGrid = []fieldTypeChoice{
 	{"日期", store.FieldTypeDate, store.DisplayPlain},
 }
 
+// fieldTypeGridLabel 字段类型下拉的选项文案（ui.Select 的 Label 函数）。
 func fieldTypeGridLabel(choice fieldTypeChoice) string { return choice.label }
 
-// fieldTypeChoiceOf 反查某字段在网格中的索引（默认 0=文本）。
-func fieldTypeChoiceOf(typeKey store.FieldType, display store.FieldDisplay) int {
-	for i, choice := range fieldTypeGrid {
+// fieldTypeGridChoices 下拉可选项（fieldTypeGrid 本身）。每次绘制重建切片：
+// Select 的选项列表声明期间被框架持有，复用全局底层数组会有并发写风险。
+func fieldTypeGridChoices() []fieldTypeChoice {
+	return append([]fieldTypeChoice(nil), fieldTypeGrid...)
+}
+
+// fieldChoiceOf 反查某字段在下拉可选项里的值（默认文本项）。
+func fieldChoiceOf(typeKey store.FieldType, display store.FieldDisplay) fieldTypeChoice {
+	for _, choice := range fieldTypeGrid {
 		if choice.typeKey == typeKey && choice.display == display {
-			return i
+			return choice
 		}
 	}
-	return 0
+	return fieldTypeGrid[0]
 }
 
 // isSelectType 判断字段是否为选择类。
@@ -290,7 +297,7 @@ func (m *model) applyQueryChange() {
 
 // newField 从编辑缓冲创建字段（page 层在点击保存时调用）。
 func (m *model) newField() {
-	choice := fieldTypeGrid[m.fieldTypeIndex]
+	choice := m.fieldTypeSel
 	input := store.FieldInput{
 		Name:     strings.TrimSpace(m.fieldName),
 		Type:     choice.typeKey,
@@ -319,7 +326,7 @@ func (m *model) updateField(id string) {
 	patch := store.FieldPatch{
 		Name: new(new(strings.TrimSpace(m.fieldName))),
 	}
-	choice := fieldTypeGrid[m.fieldTypeIndex]
+	choice := m.fieldTypeSel
 	if choice.typeKey == store.FieldTypeNumber {
 		patch.Display = new(new(choice.display))
 	}
@@ -380,11 +387,11 @@ func (m *model) openFieldModal(field *store.Field) {
 	m.fieldEditID = ""
 	m.fieldName = ""
 	m.fieldOptions = ""
-	m.fieldTypeIndex = 0
+	m.fieldTypeSel = fieldTypeGrid[0]
 	if field != nil {
 		m.fieldEditID = field.ID
 		m.fieldName = field.Name
-		m.fieldTypeIndex = fieldTypeChoiceOf(field.Type, field.Display)
+		m.fieldTypeSel = fieldChoiceOf(field.Type, field.Display)
 		m.fieldOptions = strings.Join(field.Choices(), ",")
 	}
 }

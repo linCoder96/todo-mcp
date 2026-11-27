@@ -136,9 +136,9 @@ type model struct {
 	fieldModalOpen bool
 	fieldEditID    string // 空 = 新建
 	fieldName      string
-	fieldOptions   string // 逗号分隔
-	fieldTypeIndex int
-	confirmFieldID string // 字段列删除二次确认（与任务删除 confirmID 同构）
+	fieldOptions   string          // 逗号分隔
+	fieldTypeSel   fieldTypeChoice // 字段类型下拉的选中项
+	confirmFieldID string          // 字段列删除二次确认（与任务删除 confirmID 同构）
 
 	// pageTheme 缓存当前页面主题指针（page 每次重绘入口经 setRowMeta 刷新），
 	// 供行内声明函数取主题色，避免每行重读 c.Theme() 的包装成本。
