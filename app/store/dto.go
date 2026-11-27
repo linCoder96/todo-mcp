@@ -24,7 +24,7 @@ type Task struct {
 	CompletedAt *int64
 	CreatedAt   int64
 	UpdatedAt   int64
-	// Values 是自定义字段值的协议形状（键=字段 id，值按字段类型）：
+	// Values 是自定义字段值的协议形状（键=字段名，值按字段类型）：
 	// text/single_select → string；multi_select → JSON 数组；number → number；
 	// date → RFC3339 字符串。由 loadValuesFor 聚合填充；未加载时为 nil。
 	Values map[string]json.RawMessage
@@ -53,7 +53,7 @@ type TaskPatch struct {
 	Description **string `json:"description,omitempty"`
 	Priority    **int    `json:"priority,omitempty"`
 	DueAt       **string `json:"due_at,omitempty"`
-	// Values 是自定义字段值补丁（键=字段 id）：
+	// Values 是自定义字段值补丁（键=字段名）：
 	//   整个 values 缺席 → 全部自定义值不动；值为 null 的键 → 清空该字段；有值 → 设置。
 	Values **map[string]json.RawMessage `json:"values,omitempty"`
 }

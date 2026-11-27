@@ -168,8 +168,9 @@ func fileDisplay(file store.TaskFile) string {
 }
 
 // filesPanel 抽屉内的文件区：每个文件一张两行卡片——
-//   首行：引用徽标 + 文件名（Grow+Ellipsis，不再被按钮挤没）+ 大小；
-//   次行：操作按钮（Flow 自动换行，抽屉 400 宽装不下三个长按钮也不会裁切）。
+//
+//	首行：引用徽标 + 文件名（Grow+Ellipsis，不再被按钮挤没）+ 大小；
+//	次行：操作按钮（Flow 自动换行，抽屉 400 宽装不下三个长按钮也不会裁切）。
 func (m *model) filesPanel(c ui.C) {
 	theme := m.pageTheme
 	if len(m.detailFiles) == 0 {

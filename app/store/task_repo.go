@@ -46,7 +46,7 @@ type TaskInput struct {
 	Description *string
 	Priority    int
 	DueAt       *int64
-	// Values 是创建时的自定义字段值（协议形状，键=字段 id，见 value.go 头注释）。
+	// Values 是创建时的自定义字段值（协议形状，键=字段名，见 value.go 头注释）。
 	Values map[string]json.RawMessage
 }
 

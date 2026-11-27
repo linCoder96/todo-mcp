@@ -10,7 +10,7 @@ import (
 	"todo-mcp/app/store"
 )
 
-// createInput 对应 create_task 入参；values 为自定义字段值（对象键=字段 id）。
+// createInput 对应 create_task 入参；values 为自定义字段值（对象键=字段名）。
 type createInput struct {
 	Title       string                     `json:"title"`
 	Description *string                    `json:"description,omitempty"`

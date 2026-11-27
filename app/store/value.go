@@ -1,6 +1,6 @@
 // 任务自定义字段值的解析、读写与聚合（EAV 值表，design 2026-11-24-custom-fields §4）。
 //
-// 协议值形状（Task.Values，MCP/GUI 统一；类型知识全部收敛在 store）：
+// 协议值形状（Task.Values，MCP/GUI 统一，键=字段名；类型知识全部收敛在 store）：
 //
 //	text          → JSON string
 //	single_select → JSON string（必须 ∈ options）

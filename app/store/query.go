@@ -29,7 +29,7 @@ const (
 
 // FilterCond 是单个字段筛选条件。
 type FilterCond struct {
-	Field string          `json:"field"` // 内置字段名或自定义字段 id
+	Field string          `json:"field"` // 内置字段名或自定义字段名
 	Op    FilterOp        `json:"op"`
 	Value json.RawMessage `json:"value,omitempty"` // 协议形状（empty/not_empty 可缺省）
 }

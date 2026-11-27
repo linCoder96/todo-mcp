@@ -30,7 +30,7 @@ const createTaskSchema = `{
     "description": { "type": "string", "maxLength": 5000, "description": "任务详情（可选）" },
     "priority":    { "type": "integer", "enum": [0, 1, 2, 3], "default": 0, "description": "优先级：0=无 1=低 2=中 3=高" },
     "due_at":      { "type": "string", "format": "date-time", "description": "到期时间，RFC3339（可选）" },
-    "values":      { "type": "object", "additionalProperties": true, "description": "自定义字段值：键=字段 id，值按字段类型（文本=string、数字=number、日期=RFC3339、单选=string、多选=string 数组），见 list_fields" }
+    "values":      { "type": "object", "additionalProperties": true, "description": "自定义字段值：键=字段名，值按字段类型（文本=string、数字=number、日期=RFC3339、单选=string、多选=string 数组），见 list_fields" }
   },
   "required": ["title"],
   "additionalProperties": false
@@ -46,7 +46,7 @@ const listTasksSchema = `{
     "filter":   { "type": "array", "maxItems": 10, "items": {
                    "type": "object",
                    "properties": {
-                     "field": { "type": "string", "description": "字段：内置名（title/description/priority/due_at/status/created_at/completed_at）或自定义字段 id" },
+                     "field": { "type": "string", "description": "字段：内置名（title/description/priority/due_at/status/created_at/completed_at）或自定义字段名" },
                      "op":    { "type": "string", "enum": ["eq", "contains", "gt", "lt", "is", "has", "before", "after", "empty", "not_empty"], "description": "操作符，按字段类型限制（见 list_fields）" },
                      "value": { "description": "比较值：文本/选项=string，数字=number，日期=RFC3339；empty/not_empty 省略" }
                    },
@@ -75,7 +75,7 @@ const updateTaskSchema = `{
     "description": { "type": ["string", "null"], "maxLength": 5000, "description": "新详情；传 null 清空（可选）" },
     "priority":    { "type": "integer", "enum": [0, 1, 2, 3], "description": "新优先级（可选）" },
     "due_at":      { "type": ["string", "null"], "format": "date-time", "description": "新到期时间；传 null 清除到期（可选）" },
-    "values":      { "type": ["object", "null"], "additionalProperties": true, "description": "自定义字段值：键=字段 id，值按字段类型；传 null 清空某字段值（可选）" }
+    "values":      { "type": ["object", "null"], "additionalProperties": true, "description": "自定义字段值：键=字段名，值按字段类型；传 null 清空某字段值（可选）" }
   },
   "required": ["id"],
   "additionalProperties": false
