@@ -1,0 +1,13 @@
+# 文本文件统一 LF：检出与提交均为 LF，杜绝 Windows 编辑器/工具链产生的 CRLF 假改动
+* text=auto eol=lf
+
+# Windows 批处理脚本必须 CRLF（cmd 解析器要求）
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 二进制文件不做任何转换
+*.png binary
+*.ico binary
+*.icns binary
+*.exe binary
+*.db binary
